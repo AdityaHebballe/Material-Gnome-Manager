@@ -15,6 +15,51 @@ or:
 bash ~/Documents/Material-Gnome-Manager/run.sh
 ```
 
+## Install
+
+Install system-wide with Meson:
+
+```bash
+meson setup build --prefix=/usr
+sudo meson install -C build
+```
+
+Then launch it from your app grid or run:
+
+```bash
+material-gnome-manager
+```
+
+The install includes:
+
+- `/usr/bin/material-gnome-manager`
+- the desktop entry `io.github.materialgnome.Manager.desktop`
+- the app icon `io.github.materialgnome.Manager`
+
+## Arch / AUR
+
+The AUR package files live in:
+
+```bash
+/home/aditya/Documents/Material-Gnome-Manager-aur
+```
+
+After pushing this repository to GitHub, build locally with:
+
+```bash
+cd ~/Documents/Material-Gnome-Manager-aur
+makepkg -si
+```
+
+When publishing to AUR:
+
+```bash
+makepkg --printsrcinfo > .SRCINFO
+git add PKGBUILD .SRCINFO README.md .gitignore
+git commit -m "Initial import"
+git push
+```
+
 ## v1 Scope
 
 - Fetch or update the Material GNOME source from GitHub:

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Material GNOME Manager
+Comment=Manage the Material GNOME theme
+Exec=material-gnome-manager
+Icon=io.github.materialgnome.Manager
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+StartupNotify=true

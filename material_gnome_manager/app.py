@@ -810,6 +810,11 @@ class ManagerApp(Adw.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
 
+    def do_startup(self):
+        Adw.Application.do_startup(self)
+        GLib.set_application_name("Material GNOME Manager")
+        Gtk.Window.set_default_icon_name(APP_ID)
+
     def do_activate(self):
         window = self.props.active_window
         if window is None:
