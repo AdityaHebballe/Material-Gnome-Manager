@@ -6,6 +6,12 @@ Material GNOME Manager is a GTK4/Libadwaita app for installing and customizing t
 It can fetch the theme from GitHub, install it locally, apply color presets, generate
 Matugen palettes, link GTK4/Libadwaita apps, and manage a few GNOME Shell options.
 
+## Screenshots
+
+![Material GNOME Manager main window](docs/screenshots/main-window.png)
+
+![Color preset picker](docs/screenshots/color-picker.png)
+
 ## Install
 
 ### Arch Linux
@@ -51,7 +57,6 @@ material-gnome-manager
 GTK apps need to be restarted after changing GTK theme files.
 
 GNOME Shell layout changes require logging out and back in.
-
 
 ## Uninstall
 
