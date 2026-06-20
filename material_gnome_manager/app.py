@@ -495,7 +495,10 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._run_github_action(manager.check_github_updates, "Checking for updates...", quiet=quiet)
 
     def _update_github(self, _button: Gtk.Button | None) -> None:
-        self._run_github_action(manager.fetch_or_update_github_source, "Updating GitHub source...")
+        self._run_github_action(
+            manager.update_github_source_and_installed_theme,
+            "Updating source and installed theme...",
+        )
 
     def _install_theme(self, _button: Gtk.Button) -> None:
         self._run_action("install", manager.install_theme, "Installing theme...")

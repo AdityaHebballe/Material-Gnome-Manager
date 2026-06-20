@@ -274,6 +274,25 @@ def fetch_or_update_github_source() -> str:
     return "GitHub source is already up to date"
 
 
+def update_github_source_and_installed_theme() -> str:
+    installed = INSTALL_DIR.is_dir()
+    installed_colors: dict[str, str] | None = None
+    if installed:
+        try:
+            installed_colors = _load_installed_colors()
+        except ManagerError:
+            installed_colors = None
+
+    message = fetch_or_update_github_source()
+    if not installed:
+        return message
+
+    source = _require_source()
+    colors = _merge_with_source_default_colors(source, installed_colors)
+    _install_theme_from_source(source, colors=colors)
+    return f"{message}. Refreshed installed theme files."
+
+
 def check_github_updates() -> str:
     if shutil.which("git") is None:
         raise ManagerError("git is not installed")
@@ -313,6 +332,11 @@ def get_github_source_state() -> str:
 
 def install_theme() -> str:
     source = _require_source()
+    _install_theme_from_source(source)
+    return f"Installed {THEME_NAME} to {INSTALL_DIR}"
+
+
+def _install_theme_from_source(source: Path, colors: dict[str, str] | None = None) -> None:
     _reset_backup("install")
     if INSTALL_DIR.exists() or INSTALL_DIR.is_symlink():
         _backup_path(INSTALL_DIR)
@@ -322,11 +346,12 @@ def install_theme() -> str:
             INSTALL_DIR.unlink()
     INSTALL_DIR.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, INSTALL_DIR, ignore=_copy_ignore)
+    if colors is not None:
+        _write_installed_colors(source, colors)
     if load_state().get("reduced_animations"):
-        colors = _load_installed_colors()
-        _write_shell_css(source, colors)
+        installed_colors = _load_installed_colors()
+        _write_shell_css(source, installed_colors)
         _write_gtk_animation_overrides(source, True)
-    return f"Installed {THEME_NAME} to {INSTALL_DIR}"
 
 
 def apply_preset(preset_name: str) -> str:
@@ -453,6 +478,13 @@ def _apply_colors(colors: dict[str, str]) -> None:
     for target in (gtk3_target, gtk4_target, shell_target, active_layout_target):
         _backup_path(target)
 
+    _write_installed_colors(source, colors)
+
+
+def _write_installed_colors(source: Path, colors: dict[str, str]) -> None:
+    colors = _merge_with_source_default_colors(source, colors)
+    gtk3_target = INSTALL_DIR / "gtk-3.0" / "colors.css"
+    gtk4_target = INSTALL_DIR / "gtk-4.0" / "colors.css"
     gtk3_target.write_text(_render_gtk3(source / "gtk-3.0" / "colors.css", colors), encoding="utf-8")
     gtk4_target.write_text(_render_gtk4(source / "gtk-4.0" / "colors.css", colors), encoding="utf-8")
     _write_shell_css(source, colors)
@@ -543,6 +575,36 @@ def _load_installed_colors() -> dict[str, str]:
         if match:
             colors[match.group(1)] = match.group(2).upper()
     _validate_required_tokens(colors)
+    return colors
+
+
+def _merge_with_source_default_colors(
+    source: Path,
+    colors: dict[str, str] | None,
+) -> dict[str, str]:
+    merged = _load_source_default_colors(source)
+    if colors:
+        merged.update(colors)
+    return merged
+
+
+def _load_source_default_colors(source: Path) -> dict[str, str]:
+    colors: dict[str, str] = {}
+    gtk3_path = source / "gtk-3.0" / "colors.css"
+    gtk4_path = source / "gtk-4.0" / "colors.css"
+
+    if gtk3_path.is_file():
+        for line in gtk3_path.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"@define-color\s+([a-z0-9_]+)\s+(#[0-9a-fA-F]{6})\s*;", line)
+            if match:
+                colors[match.group(1)] = match.group(2).upper()
+
+    if gtk4_path.is_file():
+        for line in gtk4_path.read_text(encoding="utf-8").splitlines():
+            match = re.match(r"\s*--([a-z0-9_]+)\s*:\s*(#[0-9a-fA-F]{6})\s*;", line)
+            if match:
+                colors[match.group(1)] = match.group(2).upper()
+
     return colors
 
 
