@@ -1,80 +1,68 @@
 # Material GNOME Manager
 
-A local GTK4/Libadwaita manager for the Material GNOME theme.
+Material GNOME Manager is a GTK4/Libadwaita app for installing and customizing the
+[Material GNOME theme](https://github.com/SakibShahariar/material-gnome-theme).
 
-## Run
-
-```bash
-cd ~/Documents/Material-Gnome-Manager
-python3 main.py
-```
-
-or:
-
-```bash
-bash ~/Documents/Material-Gnome-Manager/run.sh
-```
+It can fetch the theme from GitHub, install it locally, apply color presets, generate
+Matugen palettes, link GTK4/Libadwaita apps, and manage a few GNOME Shell options.
 
 ## Install
 
-Install system-wide with Meson:
+### Arch Linux
+
+Using `yay`:
+
+```bash
+yay -S material-gnome-manager-git
+```
+
+Using `paru`:
+
+```bash
+paru -S material-gnome-manager-git
+```
+
+### Manual Install
 
 ```bash
 meson setup build --prefix=/usr
 sudo meson install -C build
 ```
 
-Then launch it from your app grid or run:
+Launch it from your app grid or run:
 
 ```bash
 material-gnome-manager
 ```
 
-The install includes:
+## What It Does
 
-- `/usr/bin/material-gnome-manager`
-- the desktop entry `io.github.materialgnome.Manager.desktop`
-- the app icon `io.github.materialgnome.Manager`
+- Fetches or updates Material GNOME from GitHub.
+- Installs the theme to `~/.themes/Material-Gnome`.
+- Applies bundled color presets.
+- Generates colors with Matugen from your wallpaper or a selected image.
+- Links GTK4/Libadwaita config files in `~/.config/gtk-4.0`.
+- Applies GNOME Shell top bar layouts.
+- Can reduce GTK and GNOME Shell theme animations.
+- Can reset the GTK4 links it created.
 
-## Arch / AUR
+## Notes
 
-The AUR package files live in:
+GTK apps need to be restarted after changing GTK theme files.
+
+GNOME Shell layout changes require logging out and back in.
+
+
+## Uninstall
+
+For the AUR package:
 
 ```bash
-/home/aditya/Documents/Material-Gnome-Manager-aur
+sudo pacman -Rns material-gnome-manager-git
 ```
 
-After pushing this repository to GitHub, build locally with:
+For a manual Meson install:
 
 ```bash
-cd ~/Documents/Material-Gnome-Manager-aur
-makepkg -si
+sudo ./scripts/uninstall.sh /usr
 ```
-
-When publishing to AUR:
-
-```bash
-makepkg --printsrcinfo > .SRCINFO
-git add PKGBUILD .SRCINFO README.md .gitignore
-git commit -m "Initial import"
-git push
-```
-
-## v1 Scope
-
-- Fetch or update the Material GNOME source from GitHub:
-  `https://github.com/SakibShahariar/material-gnome-theme.git`
-- Select a Material GNOME source directory.
-- Install or update `~/.themes/Material-Gnome` from that source.
-- Apply bundled `themes/*.json` color presets to the installed copy.
-- Generate and apply Matugen palettes from the current wallpaper or a chosen image.
-- Apply included GNOME Shell top bar layouts.
-- Enable or disable reduced GTK and GNOME Shell theme animations.
-- Enable GTK4/Libadwaita symlinks in `~/.config/gtk-4.0`, including `colors.css`.
-- Reset manager-created GTK4 links and restore the latest backup.
-
-GNOME Shell layout changes require logging out and back in before they are visible.
-GTK animation changes require restarting the affected apps.
-GNOME Shell gsettings and Flatpak overrides are intentionally outside v1.
-
-The GitHub source is the primary workflow. Local source selection is available for development or offline testing.

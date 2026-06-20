@@ -43,3 +43,5 @@ install_data(
   'data/icons/hicolor/scalable/apps/io.github.materialgnome.Manager.svg',
   install_dir: join_paths(datadir, 'icons', 'hicolor', 'scalable', 'apps'),
 )
+
+meson.add_install_script('scripts/post-install.sh')
