@@ -1,0 +1,822 @@
+from __future__ import annotations
+
+import sys
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+
+from gi.repository import Adw, Gio, GLib, Gtk, Pango  # noqa: E402
+
+from . import manager
+
+
+APP_ID = "io.github.materialgnome.Manager"
+PREVIEW_TOKENS = ("primary", "secondary", "tertiary", "error")
+
+
+@dataclass
+class ActionControl:
+    button: Gtk.Button
+    spinner: Gtk.Spinner
+    check_icon: Gtk.Image
+
+
+def _hex_to_rgb(value: str) -> tuple[float, float, float]:
+    value = value.lstrip("#")
+    return (
+        int(value[0:2], 16) / 255,
+        int(value[2:4], 16) / 255,
+        int(value[4:6], 16) / 255,
+    )
+
+
+def _swatch(color: str, width: int = 28, height: int = 18) -> Gtk.DrawingArea:
+    area = Gtk.DrawingArea()
+    area.set_content_width(width)
+    area.set_content_height(height)
+
+    def draw(_area, ctx, draw_width: int, draw_height: int) -> None:
+        red, green, blue = _hex_to_rgb(color)
+        ctx.set_source_rgb(red, green, blue)
+        ctx.rectangle(0, 0, draw_width, draw_height)
+        ctx.fill()
+
+    area.set_draw_func(draw)
+    return area
+
+
+def _swatch_strip(colors: dict[str, str], large: bool = False) -> Gtk.Box:
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+    box.set_valign(Gtk.Align.CENTER)
+    width = 34 if large else 24
+    height = 22 if large else 16
+    for token in PREVIEW_TOKENS:
+        color = colors.get(token)
+        if color:
+            box.append(_swatch(color, width, height))
+    return box
+
+
+class PresetPickerWindow(Gtk.Window):
+    def __init__(
+        self,
+        parent: "ManagerWindow",
+        previews: list[manager.PresetPreview],
+        current: str | None,
+    ):
+        super().__init__(transient_for=parent, modal=True)
+        self.set_title("Choose Color Preset")
+        self.set_default_size(700, 560)
+        self.parent_window = parent
+        self.previews = previews
+        self.current = current
+        self.cards: dict[str, Gtk.Image] = {}
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        root.set_vexpand(True)
+        self.set_child(root)
+
+        header = Gtk.HeaderBar()
+        header.set_title_widget(Gtk.Label(label="Choose Color Preset"))
+        self.set_titlebar(header)
+
+        search_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        search_box.set_margin_top(12)
+        search_box.set_margin_bottom(12)
+        search_box.set_margin_start(12)
+        search_box.set_margin_end(12)
+        root.append(search_box)
+
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("Search presets")
+        self.search_entry.connect("search-changed", lambda _entry: self._populate())
+        search_box.append(self.search_entry)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_hexpand(True)
+        scrolled.set_vexpand(True)
+        root.append(scrolled)
+
+        self.flow = Gtk.FlowBox()
+        self.flow.set_hexpand(True)
+        self.flow.set_vexpand(True)
+        self.flow.set_valign(Gtk.Align.START)
+        self.flow.set_margin_start(12)
+        self.flow.set_margin_end(12)
+        self.flow.set_margin_bottom(12)
+        self.flow.set_column_spacing(12)
+        self.flow.set_row_spacing(12)
+        self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.flow.set_min_children_per_line(2)
+        self.flow.set_max_children_per_line(3)
+        scrolled.set_child(self.flow)
+        self._populate()
+
+    def _populate(self) -> None:
+        while child := self.flow.get_first_child():
+            self.flow.remove(child)
+        self.cards.clear()
+        query = self.search_entry.get_text().strip().lower()
+        for preview in self.previews:
+            if query and query not in preview.name.lower():
+                continue
+            self.flow.append(self._card(preview))
+
+    def _card(self, preview: manager.PresetPreview) -> Gtk.Widget:
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        content.add_css_class("card")
+        content.set_size_request(190, -1)
+        content.set_margin_top(6)
+        content.set_margin_bottom(6)
+        content.set_margin_start(6)
+        content.set_margin_end(6)
+        gesture = Gtk.GestureClick()
+        gesture.connect("released", lambda _gesture, _n_press, _x, _y: self._apply(preview.name))
+        content.add_controller(gesture)
+
+        surface = preview.colors.get("surface", "#000000")
+        surface_area = _swatch(surface, 160, 64)
+        surface_area.set_hexpand(True)
+        content.append(surface_area)
+
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        title_row.set_valign(Gtk.Align.CENTER)
+        content.append(title_row)
+
+        title = Gtk.Label(label=preview.name)
+        title.set_xalign(0)
+        title.set_hexpand(True)
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title_row.append(title)
+
+        check = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        check.add_css_class("success")
+        check.set_visible(preview.name == self.current)
+        title_row.append(check)
+        self.cards[preview.name] = check
+
+        content.append(_swatch_strip(preview.colors, large=True))
+
+        chip_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        chip_row.set_valign(Gtk.Align.CENTER)
+        on_primary = preview.colors.get("on_primary")
+        on_surface = preview.colors.get("on_surface")
+        if on_primary:
+            chip_row.append(_swatch(on_primary, 18, 14))
+            primary_chip = Gtk.Label(label="on primary")
+            primary_chip.add_css_class("caption")
+            chip_row.append(primary_chip)
+        if on_surface:
+            chip_row.append(_swatch(on_surface, 18, 14))
+            surface_chip = Gtk.Label(label="on surface")
+            surface_chip.add_css_class("caption")
+            chip_row.append(surface_chip)
+        content.append(chip_row)
+
+        return content
+
+    def _apply(self, preset_name: str) -> None:
+        if self.parent_window.is_busy():
+            return
+        self.current = preset_name
+        for name, check in self.cards.items():
+            check.set_visible(name == preset_name)
+        self.parent_window.apply_preset_from_picker(preset_name)
+
+
+class ManagerWindow(Adw.ApplicationWindow):
+    def __init__(self, app: Adw.Application):
+        super().__init__(application=app, title="Material GNOME Manager")
+        self.set_default_size(1120, 860)
+
+        self._preset_names: list[str] = []
+        self._preset_previews: list[manager.PresetPreview] = []
+        self._preset_preview_by_name: dict[str, manager.PresetPreview] = {}
+        self._current_preset_name: str | None = None
+        self._theme_installed = False
+        self._layout_names: list[str] = []
+        self._github_busy = False
+        self._busy_action: str | None = None
+        self._actions: dict[str, ActionControl] = {}
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+        refresh_button = Gtk.Button(icon_name="view-refresh-symbolic")
+        refresh_button.set_tooltip_text("Refresh Status")
+        refresh_button.connect("clicked", lambda _button: self.refresh())
+        header.pack_end(refresh_button)
+        toolbar.add_top_bar(header)
+
+        self.toast_overlay = Adw.ToastOverlay()
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.toast_overlay.set_child(scrolled)
+        toolbar.set_content(self.toast_overlay)
+        self.set_content(toolbar)
+
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(860)
+        clamp.set_tightening_threshold(480)
+        scrolled.set_child(clamp)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content.set_margin_top(18)
+        content.set_margin_bottom(18)
+        content.set_margin_start(18)
+        content.set_margin_end(18)
+        clamp.set_child(content)
+
+        source_group = Adw.PreferencesGroup(title="Source")
+        content.append(source_group)
+        self.github_row = Adw.ActionRow(title="GitHub Source")
+        self.github_row.set_subtitle("Not checked")
+        github_suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        github_suffix.set_valign(Gtk.Align.CENTER)
+        self.github_spinner = Gtk.Spinner()
+        self.github_status_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        self.github_status_icon.add_css_class("success")
+        self.fetch_button = Gtk.Button(label="Fetch")
+        self.fetch_button.add_css_class("suggested-action")
+        self.fetch_button.connect("clicked", self._fetch_github)
+        self.check_button = Gtk.Button(label="Check")
+        self.check_button.connect("clicked", self._check_github)
+        self.update_button = Gtk.Button(label="Update")
+        self.update_button.add_css_class("suggested-action")
+        self.update_button.connect("clicked", self._update_github)
+        github_suffix.append(self.github_spinner)
+        github_suffix.append(self.github_status_icon)
+        github_suffix.append(self.fetch_button)
+        github_suffix.append(self.check_button)
+        github_suffix.append(self.update_button)
+        self.github_row.add_suffix(github_suffix)
+        source_group.add(self.github_row)
+
+        self.source_row = Adw.ActionRow(title="Material GNOME Source")
+        self.source_row.set_subtitle("No source selected")
+        choose_button = Gtk.Button(label="Choose Local")
+        choose_button.set_valign(Gtk.Align.CENTER)
+        choose_button.connect("clicked", self._choose_source)
+        self.source_row.add_suffix(choose_button)
+        source_group.add(self.source_row)
+
+        self.status_group = Adw.PreferencesGroup(title="Status")
+        content.append(self.status_group)
+        self.install_row = Adw.ActionRow(title="Installed Theme")
+        self.gtk_css_row = Adw.ActionRow(title="GTK4 gtk.css")
+        self.gtk_dark_row = Adw.ActionRow(title="GTK4 gtk-dark.css")
+        self.gtk_colors_row = Adw.ActionRow(title="GTK4 colors.css")
+        self.status_group.add(self.install_row)
+        self.status_group.add(self.gtk_css_row)
+        self.status_group.add(self.gtk_dark_row)
+        self.status_group.add(self.gtk_colors_row)
+
+        preset_group = Adw.PreferencesGroup(title="Color Preset")
+        content.append(preset_group)
+        self.preset_row = Adw.ActionRow(title="Preset")
+        preset_suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        preset_suffix.set_valign(Gtk.Align.CENTER)
+        self.preset_preview_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        self.preset_preview_box.set_valign(Gtk.Align.CENTER)
+        self.preset_spinner = Gtk.Spinner()
+        self.preset_spinner.set_valign(Gtk.Align.CENTER)
+        self.preset_check_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        self.preset_check_icon.add_css_class("success")
+        self.choose_preset_button = Gtk.Button(label="Choose")
+        self.choose_preset_button.set_valign(Gtk.Align.CENTER)
+        self.choose_preset_button.connect("clicked", self._open_preset_picker)
+        preset_suffix.append(self.preset_preview_box)
+        preset_suffix.append(self.preset_spinner)
+        preset_suffix.append(self.preset_check_icon)
+        preset_suffix.append(self.choose_preset_button)
+        self.preset_row.add_suffix(preset_suffix)
+        preset_group.add(self.preset_row)
+
+        matugen_group = Adw.PreferencesGroup(title="Matugen")
+        content.append(matugen_group)
+        self.matugen_row = Adw.ActionRow(title="Generator")
+        matugen_group.add(self.matugen_row)
+        self.wallpaper_row = Adw.ActionRow(title="Current Wallpaper")
+        self._add_action_row_suffix(
+            self.wallpaper_row,
+            "matugen_wallpaper",
+            "Generate",
+            self._apply_matugen_wallpaper,
+        )
+        matugen_group.add(self.wallpaper_row)
+        self.image_row = Adw.ActionRow(title="Image")
+        self._add_action_row_suffix(
+            self.image_row,
+            "matugen_image",
+            "Choose Image",
+            self._choose_matugen_image,
+        )
+        matugen_group.add(self.image_row)
+
+        shell_group = Adw.PreferencesGroup(title="GNOME Shell")
+        content.append(shell_group)
+        self.layout_row = Adw.ActionRow(title="Top Bar Layout")
+        self.layout_dropdown = Gtk.DropDown()
+        self.layout_dropdown.set_hexpand(False)
+        self.layout_dropdown.set_valign(Gtk.Align.CENTER)
+        self.layout_dropdown.connect("notify::selected", self._layout_changed)
+        layout_suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        layout_suffix.set_valign(Gtk.Align.CENTER)
+        layout_suffix.append(self.layout_dropdown)
+        self._add_inline_action(
+            layout_suffix,
+            "shell_layout",
+            "Apply",
+            self._apply_shell_layout,
+        )
+        self.layout_row.add_suffix(layout_suffix)
+        shell_group.add(self.layout_row)
+        self._add_action(
+            shell_group,
+            "reduce_animations",
+            "Reduced GTK Animations",
+            "Disables GTK3, GTK4, and shell CSS motion",
+            "Enable",
+            self._toggle_reduced_animations,
+        )
+
+        actions_group = Adw.PreferencesGroup(title="Actions")
+        content.append(actions_group)
+        self._add_action(
+            actions_group,
+            "install",
+            "Install / Update Theme",
+            "Copy the selected source into ~/.themes/Material-Gnome",
+            "Install",
+            self._install_theme,
+            suggested=True,
+        )
+        self._add_action(
+            actions_group,
+            "gtk4",
+            "GTK4 / Libadwaita Links",
+            "Point ~/.config/gtk-4.0 at the installed theme",
+            "Enable",
+            self._enable_gtk4,
+        )
+        self._add_action(
+            actions_group,
+            "reset_gtk4",
+            "Reset GTK4 Links",
+            "Remove manager-created GTK4 links and restore backup files",
+            "Reset",
+            self._reset_gtk4,
+        )
+        self._add_action(
+            actions_group,
+            "safe_reset",
+            "Safe Reset",
+            "Restore only files managed by this app",
+            "Reset",
+            self._safe_reset,
+        )
+        self.refresh()
+        if manager.GITHUB_SOURCE_DIR.exists():
+            self._check_github(None, quiet=True)
+
+    def _add_action(
+        self,
+        group: Adw.PreferencesGroup,
+        action_id: str,
+        title: str,
+        subtitle: str,
+        label: str,
+        callback,
+        suggested: bool = False,
+    ) -> None:
+        row = Adw.ActionRow(title=title, subtitle=subtitle)
+        button = Gtk.Button(label=label)
+        button.set_valign(Gtk.Align.CENTER)
+        if suggested:
+            button.add_css_class("suggested-action")
+        button.connect("clicked", callback)
+        spinner = Gtk.Spinner()
+        spinner.set_valign(Gtk.Align.CENTER)
+        check_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        check_icon.add_css_class("success")
+        suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        suffix.set_valign(Gtk.Align.CENTER)
+        suffix.append(spinner)
+        suffix.append(check_icon)
+        suffix.append(button)
+        row.add_suffix(suffix)
+        group.add(row)
+        self._actions[action_id] = ActionControl(button=button, spinner=spinner, check_icon=check_icon)
+
+    def _add_action_row_suffix(
+        self,
+        row: Adw.ActionRow,
+        action_id: str,
+        label: str,
+        callback,
+        suggested: bool = False,
+    ) -> None:
+        button = Gtk.Button(label=label)
+        button.set_valign(Gtk.Align.CENTER)
+        if suggested:
+            button.add_css_class("suggested-action")
+        button.connect("clicked", callback)
+        spinner = Gtk.Spinner()
+        spinner.set_valign(Gtk.Align.CENTER)
+        check_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        check_icon.add_css_class("success")
+        suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        suffix.set_valign(Gtk.Align.CENTER)
+        suffix.append(spinner)
+        suffix.append(check_icon)
+        suffix.append(button)
+        row.add_suffix(suffix)
+        self._actions[action_id] = ActionControl(button=button, spinner=spinner, check_icon=check_icon)
+
+    def _add_inline_action(
+        self,
+        box: Gtk.Box,
+        action_id: str,
+        label: str,
+        callback,
+        suggested: bool = False,
+    ) -> None:
+        spinner = Gtk.Spinner()
+        spinner.set_valign(Gtk.Align.CENTER)
+        check_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        check_icon.add_css_class("success")
+        button = Gtk.Button(label=label)
+        button.set_valign(Gtk.Align.CENTER)
+        if suggested:
+            button.add_css_class("suggested-action")
+        button.connect("clicked", callback)
+        box.append(spinner)
+        box.append(check_icon)
+        box.append(button)
+        self._actions[action_id] = ActionControl(button=button, spinner=spinner, check_icon=check_icon)
+
+    def _choose_source(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileChooserNative(
+            title="Choose Material GNOME Source",
+            transient_for=self,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+            accept_label="Choose",
+            cancel_label="Cancel",
+        )
+        dialog.connect("response", self._source_response)
+        dialog.show()
+
+    def _source_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
+        if response == Gtk.ResponseType.ACCEPT:
+            file = dialog.get_file()
+            path = file.get_path() if file else None
+            if path:
+                try:
+                    manager.set_source_dir(Path(path))
+                except manager.ManagerError as exc:
+                    self._set_log(str(exc))
+                else:
+                    self._set_log("Source selected")
+                self.refresh(keep_log=True)
+        dialog.destroy()
+
+    def _layout_changed(self, _dropdown: Gtk.DropDown, _param) -> None:
+        self._refresh_action_controls(manager.get_status())
+
+    def _fetch_github(self, _button: Gtk.Button | None) -> None:
+        self._run_github_action(manager.fetch_or_update_github_source, "Fetching GitHub source...")
+
+    def _check_github(self, _button: Gtk.Button | None, quiet: bool = False) -> None:
+        self._run_github_action(manager.check_github_updates, "Checking for updates...", quiet=quiet)
+
+    def _update_github(self, _button: Gtk.Button | None) -> None:
+        self._run_github_action(manager.fetch_or_update_github_source, "Updating GitHub source...")
+
+    def _install_theme(self, _button: Gtk.Button) -> None:
+        self._run_action("install", manager.install_theme, "Installing theme...")
+
+    def _open_preset_picker(self, _button: Gtk.Button) -> None:
+        if not self._preset_previews:
+            self._set_log("No presets available")
+            return
+        picker = PresetPickerWindow(self, self._preset_previews, self._current_preset_name)
+        picker.present()
+
+    def apply_preset_from_picker(self, preset_name: str) -> None:
+        self._current_preset_name = preset_name
+        self._refresh_preset_row()
+        self._run_action("preset", lambda: manager.apply_preset(preset_name), "Applying color preset...")
+
+    def _apply_matugen_wallpaper(self, _button: Gtk.Button) -> None:
+        self._run_action(
+            "matugen_wallpaper",
+            manager.apply_matugen_from_current_wallpaper,
+            "Generating colors from current wallpaper...",
+        )
+
+    def _choose_matugen_image(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileChooserNative(
+            title="Choose Image",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+            accept_label="Generate",
+            cancel_label="Cancel",
+        )
+        image_filter = Gtk.FileFilter()
+        image_filter.set_name("Images")
+        image_filter.add_pixbuf_formats()
+        dialog.add_filter(image_filter)
+        dialog.connect("response", self._matugen_image_response)
+        dialog.show()
+
+    def _matugen_image_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
+        if response == Gtk.ResponseType.ACCEPT:
+            file = dialog.get_file()
+            path = file.get_path() if file else None
+            if path:
+                image = Path(path)
+                self._run_action(
+                    "matugen_image",
+                    lambda: manager.apply_matugen_from_image(image),
+                    "Generating colors from image...",
+                )
+        dialog.destroy()
+
+    def _apply_shell_layout(self, _button: Gtk.Button) -> None:
+        layout = self._selected_layout()
+        if layout is None:
+            self._set_log("Select a top bar layout first")
+            return
+        self._run_action(
+            "shell_layout",
+            lambda: manager.apply_top_bar_layout(layout),
+            "Applying top bar layout...",
+        )
+
+    def _toggle_reduced_animations(self, _button: Gtk.Button) -> None:
+        status = manager.get_status()
+        enabled = not status.reduced_animations
+        self._run_action(
+            "reduce_animations",
+            lambda: manager.set_reduced_animations(enabled),
+            "Updating animation setting...",
+        )
+
+    def _enable_gtk4(self, _button: Gtk.Button) -> None:
+        self._run_action("gtk4", manager.enable_gtk4_links, "Enabling GTK4 links...")
+
+    def _reset_gtk4(self, _button: Gtk.Button) -> None:
+        self._run_action("reset_gtk4", manager.reset_gtk4_links, "Resetting GTK4 links...")
+
+    def _safe_reset(self, _button: Gtk.Button) -> None:
+        self._run_action("safe_reset", manager.safe_reset, "Running safe reset...")
+
+    def is_busy(self) -> bool:
+        return self._busy_action is not None or self._github_busy
+
+    def _run_action(self, action_id: str, callback, loading_message: str) -> None:
+        if self._busy_action is not None:
+            return
+        self._busy_action = action_id
+        self._set_log(loading_message)
+        self.refresh(keep_log=True)
+
+        def worker() -> None:
+            try:
+                result = callback()
+            except manager.ManagerError as exc:
+                GLib.idle_add(self._finish_action, str(exc))
+            except OSError as exc:
+                GLib.idle_add(self._finish_action, f"Filesystem error: {exc}")
+            else:
+                GLib.idle_add(self._finish_action, str(result or "Done"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_action(self, message: str) -> bool:
+        self._busy_action = None
+        self._set_log(message)
+        self.refresh(keep_log=True)
+        return GLib.SOURCE_REMOVE
+
+    def _run_github_action(self, callback, loading_message: str, quiet: bool = False) -> None:
+        if self._github_busy:
+            return
+        self._github_busy = True
+        if not quiet:
+            self._set_log(loading_message)
+        self.refresh(keep_log=True)
+
+        def worker() -> None:
+            try:
+                result = callback()
+            except manager.ManagerError as exc:
+                GLib.idle_add(self._finish_github_action, str(exc))
+            except OSError as exc:
+                GLib.idle_add(self._finish_github_action, f"Filesystem error: {exc}")
+            else:
+                GLib.idle_add(self._finish_github_action, str(result or "Done"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_github_action(self, message: str) -> bool:
+        self._github_busy = False
+        self._set_log(message)
+        self.refresh(keep_log=True)
+        return GLib.SOURCE_REMOVE
+
+    def refresh(self, keep_log: bool = False) -> None:
+        status = manager.get_status()
+        self.github_row.set_subtitle(f"{manager.GITHUB_REPO_URL}\n{status.github_source_dir}\n{status.github_state}")
+        self._refresh_github_controls(status.github_state)
+        if status.source_dir:
+            self.source_row.set_subtitle(f"{status.source_dir}\n{status.source_message}")
+        else:
+            self.source_row.set_subtitle(status.source_message)
+
+        self.install_row.set_subtitle("Installed" if status.installed else "Not installed")
+        self._theme_installed = status.installed
+        self.gtk_css_row.set_subtitle(status.gtk_css_state)
+        self.gtk_dark_row.set_subtitle(status.gtk_dark_css_state)
+        self.gtk_colors_row.set_subtitle(status.gtk_colors_state)
+        self._refresh_status_rows(status)
+        self.matugen_row.set_subtitle(status.matugen_state)
+        if status.current_wallpaper:
+            self.wallpaper_row.set_subtitle(str(status.current_wallpaper))
+        else:
+            self.wallpaper_row.set_subtitle("No local wallpaper image detected")
+        self.image_row.set_subtitle("Generate a palette from a selected image")
+
+        self._preset_names = status.presets
+        self._preset_previews = manager.get_preset_previews(status.source_dir if status.source_valid else None)
+        self._preset_preview_by_name = {preview.name: preview for preview in self._preset_previews}
+        self._current_preset_name = status.current_preset
+        self._refresh_preset_row()
+        self._layout_names = status.layouts
+        self.layout_dropdown.set_model(Gtk.StringList.new(self._layout_names))
+        if status.active_layout in self._layout_names:
+            self.layout_dropdown.set_selected(self._layout_names.index(status.active_layout))
+        elif self._layout_names:
+            self.layout_dropdown.set_selected(0)
+        active_layout = status.active_layout or "None"
+        self.layout_row.set_subtitle(
+            f"Active: {active_layout}. Log out and back in to see changes."
+        )
+        self._refresh_action_controls(status)
+
+        if not keep_log:
+            self._set_log("Ready")
+
+    def _refresh_preset_row(self) -> None:
+        while child := self.preset_preview_box.get_first_child():
+            self.preset_preview_box.remove(child)
+
+        preview = (
+            self._preset_preview_by_name.get(self._current_preset_name)
+            if self._current_preset_name
+            else None
+        )
+        if preview:
+            self.preset_row.set_subtitle(f"{preview.name} selected")
+            self.preset_preview_box.append(_swatch_strip(preview.colors))
+            self.preset_check_icon.set_visible(self._busy_action != "preset")
+        elif self._preset_previews:
+            label = "Custom / Matugen" if self._theme_installed else "No preset applied"
+            self.preset_row.set_subtitle(f"{label}. {len(self._preset_previews)} presets available.")
+            self.preset_check_icon.set_visible(False)
+        else:
+            self.preset_row.set_subtitle("No presets available")
+            self.preset_check_icon.set_visible(False)
+
+        busy = self._busy_action == "preset"
+        self.preset_spinner.set_visible(busy)
+        if busy:
+            self.preset_spinner.start()
+        else:
+            self.preset_spinner.stop()
+        self.choose_preset_button.set_visible(not busy)
+        self.choose_preset_button.set_sensitive(self._busy_action is None and not self._github_busy)
+
+    def _set_log(self, message: str) -> None:
+        if message and message != "Ready":
+            self.toast_overlay.add_toast(Adw.Toast(title=message))
+
+    def _refresh_github_controls(self, github_state: str) -> None:
+        self.github_spinner.set_visible(self._github_busy)
+        if self._github_busy:
+            self.github_spinner.start()
+        else:
+            self.github_spinner.stop()
+
+        not_fetched = github_state == "not fetched"
+        update_available = "update available" in github_state or "behind" in github_state
+        up_to_date = github_state == "up to date"
+
+        self.fetch_button.set_visible(not_fetched and not self._github_busy)
+        self.check_button.set_visible(
+            not not_fetched and not update_available and not self._github_busy
+        )
+        self.update_button.set_visible(update_available and not self._github_busy)
+        self.github_status_icon.set_visible(up_to_date and not self._github_busy)
+
+    def _refresh_status_rows(self, status: manager.ThemeStatus) -> None:
+        self.install_row.set_visible(not status.installed)
+        self.gtk_css_row.set_visible(status.gtk_css_state != "linked")
+        self.gtk_dark_row.set_visible(status.gtk_dark_css_state != "linked")
+        self.gtk_colors_row.set_visible(status.gtk_colors_state != "linked")
+        self.status_group.set_visible(
+            not status.installed
+            or status.gtk_css_state != "linked"
+            or status.gtk_dark_css_state != "linked"
+            or status.gtk_colors_state != "linked"
+        )
+
+    def _refresh_action_controls(self, status: manager.ThemeStatus) -> None:
+        gtk4_linked = (
+            status.gtk_css_state == "linked"
+            and status.gtk_dark_css_state == "linked"
+            and status.gtk_colors_state == "linked"
+        )
+        matugen_available = status.matugen_state != "not installed"
+        matugen_wallpaper_applied = status.last_preset == "Matugen: Current Wallpaper"
+        matugen_image_applied = bool(
+            status.last_preset
+            and status.last_preset.startswith("Matugen: ")
+            and not matugen_wallpaper_applied
+        )
+        selected_layout = self._selected_layout()
+        done = {
+            "install": status.installed,
+            "matugen_wallpaper": matugen_wallpaper_applied,
+            "matugen_image": matugen_image_applied,
+            "shell_layout": bool(
+                status.installed and selected_layout and status.active_layout == selected_layout
+            ),
+            "reduce_animations": status.reduced_animations,
+            "gtk4": gtk4_linked,
+            "reset_gtk4": not self._has_manager_created_targets(),
+            "safe_reset": not self._has_manager_created_targets(),
+        }
+        runnable = {
+            "install": status.source_valid,
+            "matugen_wallpaper": bool(
+                status.source_valid and matugen_available and status.current_wallpaper
+            ),
+            "matugen_image": bool(status.source_valid and matugen_available),
+            "shell_layout": bool(status.source_valid and status.layouts and selected_layout),
+            "reduce_animations": status.source_valid,
+            "gtk4": status.installed,
+            "reset_gtk4": self._has_manager_created_targets(),
+            "safe_reset": self._has_manager_created_targets(),
+        }
+        if "reduce_animations" in self._actions:
+            self._actions["reduce_animations"].button.set_label(
+                "Disable" if status.reduced_animations else "Enable"
+            )
+
+        for action_id, control in self._actions.items():
+            busy = self._busy_action == action_id
+            repeatable = action_id in {"matugen_wallpaper", "matugen_image", "reduce_animations"}
+            control.spinner.set_visible(busy)
+            if busy:
+                control.spinner.start()
+            else:
+                control.spinner.stop()
+            control.check_icon.set_visible(done[action_id] and not busy)
+            control.button.set_visible(
+                runnable[action_id] and (repeatable or not done[action_id]) and not busy
+            )
+            control.button.set_sensitive(self._busy_action is None and not self._github_busy)
+
+    def _selected_layout(self) -> str | None:
+        if not self._layout_names:
+            return None
+        selected = self.layout_dropdown.get_selected()
+        if selected < 0 or selected >= len(self._layout_names):
+            return None
+        return self._layout_names[selected]
+
+    def _has_manager_created_targets(self) -> bool:
+        state = manager.load_state()
+        return any(Path(value).exists() or Path(value).is_symlink() for value in state.get("created_files", []))
+
+
+class ManagerApp(Adw.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+
+    def do_activate(self):
+        window = self.props.active_window
+        if window is None:
+            window = ManagerWindow(self)
+        window.present()
+
+
+def main(argv: list[str] | None = None) -> int:
+    app = ManagerApp()
+    return app.run(argv or sys.argv)
