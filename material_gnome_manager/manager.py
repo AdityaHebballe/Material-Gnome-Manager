@@ -47,9 +47,16 @@ GTK_ANIMATION_FILES = (
 LAYOUT_COLOR_MAP = {
     "#b1c5ff": "primary",
     "#002c71": "on_primary",
+    "#dfc2a3": "primary",
+    "#3f2d17": "on_primary",
     "#11131a": "surface",
+    "#151311": "surface",
+    "#221f1d": "surface_container",
+    "#281d19": "surface_container",
+    "#2c2927": "surface_container",
     "#1d1f27": "surface_container",
     "#e1e2ec": "on_surface",
+    "#e8e1dd": "on_surface",
     "#ffb4ab": "error",
     "#ffb695": "error",
     "#571e00": "on_error",
@@ -735,7 +742,23 @@ def _render_layout(source: Path, colors: dict[str, str], layout_name: str) -> st
     for original, token in LAYOUT_COLOR_MAP.items():
         if token in colors:
             text = re.sub(re.escape(original), colors[token], text, flags=re.IGNORECASE)
+            text = _replace_layout_rgba(text, original, colors[token])
     return text.rstrip() + "\n"
+
+
+def _replace_layout_rgba(text: str, original: str, replacement: str) -> str:
+    original_red, original_green, original_blue = _hex_to_rgb(original)
+    replacement_red, replacement_green, replacement_blue = _hex_to_rgb(replacement)
+    pattern = (
+        rf"rgba\(\s*{original_red}\s*,\s*{original_green}\s*,\s*"
+        rf"{original_blue}\s*,\s*([0-9.]+)\s*\)"
+    )
+    return re.sub(
+        pattern,
+        rf"rgba({replacement_red}, {replacement_green}, {replacement_blue}, \1)",
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def _reduced_animations_block() -> str:
