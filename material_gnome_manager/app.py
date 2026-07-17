@@ -62,6 +62,190 @@ def _swatch_strip(colors: dict[str, str], large: bool = False) -> Gtk.Box:
     return box
 
 
+def _layout_preview(layout_name: str, colors: dict[str, str]) -> Gtk.DrawingArea:
+    """Draw a small, palette-aware representation of a GNOME Shell panel layout."""
+    area = Gtk.DrawingArea()
+    area.set_content_width(230)
+    area.set_content_height(58)
+    area.set_hexpand(True)
+
+    primary = colors.get("primary", "#b1c5ff")
+    surface = colors.get("surface", "#11131a")
+    container = colors.get("surface_container", surface)
+    on_surface = colors.get("on_surface", "#e1e2ec")
+    outline = colors.get("outline_variant", primary)
+
+    def rounded_rect(ctx, x: float, y: float, width: float, height: float, radius: float) -> None:
+        ctx.new_sub_path()
+        ctx.arc(x + width - radius, y + radius, radius, -1.5708, 0)
+        ctx.arc(x + width - radius, y + height - radius, radius, 0, 1.5708)
+        ctx.arc(x + radius, y + height - radius, radius, 1.5708, 3.1416)
+        ctx.arc(x + radius, y + radius, radius, 3.1416, 4.7124)
+        ctx.close_path()
+
+    def paint(ctx, color: str, alpha: float = 1.0) -> None:
+        ctx.set_source_rgba(*_hex_to_rgb(color), alpha)
+        ctx.fill()
+
+    def draw(_area, ctx, width: int, height: int) -> None:
+        def panel(
+            x: float,
+            y: float,
+            panel_width: float,
+            panel_height: float,
+            radius: float,
+            *,
+            alpha: float = 0.96,
+            border: bool = False,
+        ) -> None:
+            rounded_rect(ctx, x, y, panel_width, panel_height, radius)
+            paint(ctx, container, alpha)
+            if border:
+                ctx.set_source_rgba(*_hex_to_rgb(outline), 0.72)
+                ctx.set_line_width(1)
+                rounded_rect(ctx, x + 0.5, y + 0.5, panel_width - 1, panel_height - 1, radius)
+                ctx.stroke()
+
+        def items(x: float, y: float, count: int = 3, spacing: float = 9) -> None:
+            ctx.set_source_rgba(*_hex_to_rgb(on_surface), 0.82)
+            for index in range(count):
+                ctx.arc(x + index * spacing, y, 1.8, 0, 6.2832)
+                ctx.fill()
+
+        bottom = "bottom" in layout_name
+        y = height - 26 if bottom else 8
+        if layout_name in {"default", "default-transparecy", "unified-border"}:
+            panel(4, y, width - 8, 20, 0, alpha=0.74 if layout_name == "default-transparecy" else 1)
+            if layout_name == "unified-border":
+                ctx.set_source_rgb(*_hex_to_rgb(primary))
+                ctx.set_line_width(2)
+                ctx.move_to(4, y + 19)
+                ctx.line_to(width - 4, y + 19)
+                ctx.stroke()
+            items(22, y + 10)
+            items(width - 50, y + 10)
+        elif layout_name == "unified-bar":
+            panel(8, y, width - 16, 22, 9, alpha=0.9)
+            ctx.set_source_rgba(*_hex_to_rgb(outline), 0.5)
+            ctx.set_line_width(1)
+            for divider in (width * 0.32, width * 0.68):
+                ctx.move_to(divider, y + 5)
+                ctx.line_to(divider, y + 17)
+            ctx.stroke()
+            items(24, y + 11)
+            items(width - 52, y + 11)
+        elif layout_name == "structured-box":
+            panel(12, y, width - 24, 22, 6, alpha=0.94, border=True)
+            items(28, y + 11)
+            items(width - 56, y + 11)
+        elif layout_name == "pill-duo":
+            panel(14, y, 82, 22, 11, alpha=0.72)
+            panel(width - 96, y, 82, 22, 11, alpha=0.72)
+            items(30, y + 11, 3)
+            items(width - 78, y + 11, 3)
+        elif layout_name in {"segmented-dock", "segmented-pill", "unified-pill"}:
+            radius = 11 if layout_name == "segmented-dock" else 16
+            panel(12, y, 64, 22, radius, alpha=0.88, border=True)
+            panel(width / 2 - 34, y, 68, 22, radius, alpha=0.88, border=True)
+            panel(width - 76, y, 64, 22, radius, alpha=0.88, border=True)
+            items(26, y + 11, 2)
+            items(width / 2 - 18, y + 11, 3)
+            items(width - 61, y + 11, 2)
+        elif layout_name in {"floating-capsule", "floating-capsule-glass"}:
+            glass = layout_name == "floating-capsule-glass"
+            panel(12, y, 58, 22, 7 if glass else 10, alpha=0.58 if glass else 0.9, border=True)
+            panel(width / 2 - 30, y, 60, 22, 7 if glass else 10, alpha=0.58 if glass else 0.9, border=True)
+            panel(width - 70, y, 58, 22, 7 if glass else 10, alpha=0.58 if glass else 0.9, border=True)
+            items(25, y + 11, 2)
+            items(width / 2 - 12, y + 11, 2)
+            items(width - 56, y + 11, 2)
+        else:  # Unified capsule variants.
+            panel(12, y, width - 24, 22, 11, alpha=0.9, border=True)
+            items(29, y + 11)
+            items(width / 2 - 8, y + 11, 2)
+            items(width - 56, y + 11)
+
+    area.set_draw_func(draw)
+    return area
+
+
+def _layout_title(layout_name: str) -> str:
+    return layout_name.replace("-", " ").title()
+
+
+class LayoutPickerWindow(Gtk.Window):
+    def __init__(
+        self,
+        parent: "ManagerWindow",
+        layouts: list[str],
+        current: str | None,
+        colors: dict[str, str],
+    ):
+        super().__init__(transient_for=parent, modal=True)
+        self.set_title("Choose Top Bar Layout")
+        self.set_default_size(700, 540)
+        self.parent_window = parent
+        self.layouts = layouts
+        self.current = current
+        self.colors = colors
+        self.cards: dict[str, Gtk.Image] = {}
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.set_child(scrolled)
+
+        self.flow = Gtk.FlowBox()
+        self.flow.set_hexpand(True)
+        self.flow.set_valign(Gtk.Align.START)
+        self.flow.set_margin_top(12)
+        self.flow.set_margin_bottom(12)
+        self.flow.set_margin_start(12)
+        self.flow.set_margin_end(12)
+        self.flow.set_column_spacing(12)
+        self.flow.set_row_spacing(12)
+        self.flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.flow.set_min_children_per_line(2)
+        self.flow.set_max_children_per_line(3)
+        scrolled.set_child(self.flow)
+        for layout_name in layouts:
+            self.flow.append(self._card(layout_name))
+
+    def _card(self, layout_name: str) -> Gtk.Widget:
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        content.add_css_class("card")
+        content.set_size_request(210, -1)
+        content.set_margin_top(6)
+        content.set_margin_bottom(6)
+        content.set_margin_start(6)
+        content.set_margin_end(6)
+        gesture = Gtk.GestureClick()
+        gesture.connect("released", lambda _gesture, _n_press, _x, _y: self._select(layout_name))
+        content.add_controller(gesture)
+        content.append(_layout_preview(layout_name, self.colors))
+
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        title = Gtk.Label(label=_layout_title(layout_name))
+        title.set_xalign(0)
+        title.set_hexpand(True)
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        title_row.append(title)
+        check = Gtk.Image.new_from_icon_name("object-select-symbolic")
+        check.add_css_class("success")
+        check.set_visible(layout_name == self.current)
+        title_row.append(check)
+        self.cards[layout_name] = check
+        content.append(title_row)
+        return content
+
+    def _select(self, layout_name: str) -> None:
+        if self.parent_window.is_busy():
+            return
+        for name, check in self.cards.items():
+            check.set_visible(name == layout_name)
+        self.parent_window.select_layout_from_picker(layout_name)
+        self.close()
+
+
 class PresetPickerWindow(Gtk.Window):
     def __init__(
         self,
@@ -201,6 +385,8 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._current_preset_name: str | None = None
         self._theme_installed = False
         self._layout_names: list[str] = []
+        self._selected_layout_name: str | None = None
+        self._layout_preview_colors: dict[str, str] = {}
         self._github_busy = False
         self._busy_action: str | None = None
         self._actions: dict[str, ActionControl] = {}
@@ -321,13 +507,15 @@ class ManagerWindow(Adw.ApplicationWindow):
         shell_group = Adw.PreferencesGroup(title="GNOME Shell")
         content.append(shell_group)
         self.layout_row = Adw.ActionRow(title="Top Bar Layout")
-        self.layout_dropdown = Gtk.DropDown()
-        self.layout_dropdown.set_hexpand(False)
-        self.layout_dropdown.set_valign(Gtk.Align.CENTER)
-        self.layout_dropdown.connect("notify::selected", self._layout_changed)
         layout_suffix = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         layout_suffix.set_valign(Gtk.Align.CENTER)
-        layout_suffix.append(self.layout_dropdown)
+        self.layout_preview_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        self.layout_preview_box.set_valign(Gtk.Align.CENTER)
+        self.layout_choose_button = Gtk.Button(label="Choose")
+        self.layout_choose_button.set_valign(Gtk.Align.CENTER)
+        self.layout_choose_button.connect("clicked", self._open_layout_picker)
+        layout_suffix.append(self.layout_preview_box)
+        layout_suffix.append(self.layout_choose_button)
         self._add_inline_action(
             layout_suffix,
             "shell_layout",
@@ -485,9 +673,6 @@ class ManagerWindow(Adw.ApplicationWindow):
                 self.refresh(keep_log=True)
         dialog.destroy()
 
-    def _layout_changed(self, _dropdown: Gtk.DropDown, _param) -> None:
-        self._refresh_action_controls(manager.get_status())
-
     def _fetch_github(self, _button: Gtk.Button | None) -> None:
         self._run_github_action(manager.fetch_or_update_github_source, "Fetching GitHub source...")
 
@@ -509,6 +694,23 @@ class ManagerWindow(Adw.ApplicationWindow):
             return
         picker = PresetPickerWindow(self, self._preset_previews, self._current_preset_name)
         picker.present()
+
+    def _open_layout_picker(self, _button: Gtk.Button) -> None:
+        if not self._layout_names:
+            self._set_log("No top bar layouts available")
+            return
+        picker = LayoutPickerWindow(
+            self,
+            self._layout_names,
+            self._selected_layout_name,
+            self._layout_preview_colors,
+        )
+        picker.present()
+
+    def select_layout_from_picker(self, layout_name: str) -> None:
+        self._selected_layout_name = layout_name
+        self._refresh_layout_row(manager.get_status())
+        self._refresh_action_controls(manager.get_status())
 
     def apply_preset_from_picker(self, preset_name: str) -> None:
         self._current_preset_name = preset_name
@@ -661,15 +863,12 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._current_preset_name = status.current_preset
         self._refresh_preset_row()
         self._layout_names = status.layouts
-        self.layout_dropdown.set_model(Gtk.StringList.new(self._layout_names))
-        if status.active_layout in self._layout_names:
-            self.layout_dropdown.set_selected(self._layout_names.index(status.active_layout))
-        elif self._layout_names:
-            self.layout_dropdown.set_selected(0)
-        active_layout = status.active_layout or "None"
-        self.layout_row.set_subtitle(
-            f"Active: {active_layout}. Log out and back in to see changes."
+        if self._selected_layout_name not in self._layout_names:
+            self._selected_layout_name = status.active_layout if status.active_layout in self._layout_names else None
+        self._layout_preview_colors = manager.get_preview_colors(
+            status.source_dir if status.source_valid else None
         )
+        self._refresh_layout_row(status)
         self._refresh_action_controls(status)
 
         if not keep_log:
@@ -704,6 +903,25 @@ class ManagerWindow(Adw.ApplicationWindow):
             self.preset_spinner.stop()
         self.choose_preset_button.set_visible(not busy)
         self.choose_preset_button.set_sensitive(self._busy_action is None and not self._github_busy)
+
+    def _refresh_layout_row(self, status: manager.ThemeStatus) -> None:
+        while child := self.layout_preview_box.get_first_child():
+            self.layout_preview_box.remove(child)
+        if self._selected_layout_name:
+            self.layout_preview_box.append(
+                _layout_preview(self._selected_layout_name, self._layout_preview_colors)
+            )
+        active_layout = status.active_layout or "None"
+        selected = self._selected_layout_name or "None"
+        if selected == status.active_layout:
+            self.layout_row.set_subtitle(
+                f"Active: {_layout_title(active_layout)}. Log out and back in to see changes."
+            )
+        else:
+            self.layout_row.set_subtitle(
+                f"Selected: {_layout_title(selected)}. Active: {_layout_title(active_layout)}."
+            )
+        self.layout_choose_button.set_sensitive(self._busy_action is None and not self._github_busy)
 
     def _set_log(self, message: str) -> None:
         if message and message != "Ready":
@@ -797,12 +1015,7 @@ class ManagerWindow(Adw.ApplicationWindow):
             control.button.set_sensitive(self._busy_action is None and not self._github_busy)
 
     def _selected_layout(self) -> str | None:
-        if not self._layout_names:
-            return None
-        selected = self.layout_dropdown.get_selected()
-        if selected < 0 or selected >= len(self._layout_names):
-            return None
-        return self._layout_names[selected]
+        return self._selected_layout_name if self._selected_layout_name in self._layout_names else None
 
     def _has_manager_created_targets(self) -> bool:
         state = manager.load_state()

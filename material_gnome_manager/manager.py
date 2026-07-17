@@ -45,6 +45,13 @@ GTK_ANIMATION_FILES = (
     "gtk-4.0/gtk-dark.css",
 )
 LAYOUT_COLOR_MAP = {
+    # Current upstream layouts use this palette (as of July 2026).
+    "#dfc2a3": "primary",
+    "#3f2d17": "on_primary",
+    "#151311": "surface",
+    "#221f1d": "surface_container",
+    "#e8e1dd": "on_surface",
+    # Retain the original palette so locally checked-out older sources work too.
     "#b1c5ff": "primary",
     "#002c71": "on_primary",
     "#11131a": "surface",
@@ -54,6 +61,75 @@ LAYOUT_COLOR_MAP = {
     "#ffb695": "error",
     "#571e00": "on_error",
     "#f3ded7": "on_error_container",
+}
+GTK_NAMED_COLOR_TOKEN_MAP = {
+    "theme_fg_color": "on_surface",
+    "theme_text_color": "on_surface",
+    "theme_bg_color": "surface",
+    "theme_base_color": "surface_container",
+    "theme_selected_bg_color": "primary",
+    "theme_selected_fg_color": "on_primary",
+    "insensitive_bg_color": "surface_container_low",
+    "insensitive_fg_color": "on_surface_variant",
+    "insensitive_base_color": "surface",
+    "theme_unfocused_fg_color": "on_surface_variant",
+    "theme_unfocused_text_color": "on_surface_variant",
+    "theme_unfocused_bg_color": "surface",
+    "theme_unfocused_base_color": "surface_container_low",
+    "theme_unfocused_selected_bg_color": "secondary_container",
+    "theme_unfocused_selected_fg_color": "on_secondary_container",
+    "unfocused_insensitive_color": "on_surface_variant",
+    "borders": "outline_variant",
+    "unfocused_borders": "outline_variant",
+    "warning_color": "tertiary",
+    "error_color": "error",
+    "success_color": "primary",
+    "wm_focused_title": "primary",
+    "wm_unfocused_title": "on_surface_variant",
+    "wm_highlight": "primary",
+    "wm_border": "shadow",
+    "wm_focused_bg": "surface",
+    "wm_unfocused_bg": "surface",
+    "wm_button_icon": "on_surface",
+    "wm_button_focused_bg": "surface_container",
+    "wm_button_unfocused_bg": "surface_container_low",
+    "wm_button_hover_fg": "on_primary_container",
+    "wm_button_active_fg": "on_primary_container",
+    "wm_button_hover_bg": "primary_container",
+    "wm_button_active_bg": "primary_container",
+    "content_view_bg": "surface_container",
+    "placeholder_text_color": "primary",
+    "text_view_bg": "surface_container",
+    "accent_bg_color": "primary_container",
+    "accent_fg_color": "on_primary_container",
+    "accent_color": "primary",
+    "destructive_bg_color": "error_container",
+    "destructive_fg_color": "on_error_container",
+    "destructive_color": "error",
+    "success_bg_color": "secondary_container",
+    "success_fg_color": "on_secondary_container",
+    "warning_bg_color": "tertiary_container",
+    "warning_fg_color": "on_tertiary_container",
+    "error_bg_color": "error_container",
+    "error_fg_color": "on_error_container",
+    "window_bg_color": "surface",
+    "window_fg_color": "on_surface",
+    "view_bg_color": "surface_container",
+    "view_fg_color": "on_surface",
+    "headerbar_bg_color": "surface",
+    "headerbar_fg_color": "primary",
+    "headerbar_border_color": "outline_variant",
+    "headerbar_backdrop_color": "surface",
+    "headerbar_shade_color": "shadow",
+    "card_bg_color": "surface_container",
+    "card_fg_color": "on_surface",
+    "card_shade_color": "shadow",
+    "dialog_bg_color": "surface_container_high",
+    "dialog_fg_color": "on_surface",
+    "popover_bg_color": "surface_container_high",
+    "popover_fg_color": "on_surface",
+    "shade_color": "shadow",
+    "scrollbar_outline_color": "outline_variant",
 }
 
 
@@ -168,6 +244,19 @@ def get_preset_previews(source: Path | None = None) -> list[PresetPreview]:
             continue
         previews.append(PresetPreview(name=name, colors=colors))
     return previews
+
+
+def get_preview_colors(source: Path | None = None) -> dict[str, str]:
+    """Return the installed palette when available, otherwise the source default."""
+    source = source or get_source_dir()
+    if source is None:
+        return {}
+    if INSTALL_DIR.is_dir():
+        try:
+            return _load_installed_colors()
+        except ManagerError:
+            pass
+    return _load_source_default_colors(source)
 
 
 def get_current_preset_name(source: Path | None = None) -> str | None:
@@ -855,8 +944,20 @@ def _render_gtk4(template: Path, colors: dict[str, str]) -> str:
         match = re.match(r"(\s*--)([a-z0-9_]+)(\s*:\s*)(#[0-9a-fA-F]{6})(;.*)", line)
         if match and match.group(2) in colors:
             lines.append(f"{match.group(1)}{match.group(2)}{match.group(3)}{colors[match.group(2)]}{match.group(5)}")
-        else:
-            lines.append(line)
+            continue
+        named_match = re.match(
+            r"(@define-color\s+)([a-z0-9_-]+)(\s+)(#[0-9a-fA-F]{6})(;.*)",
+            line,
+        )
+        if named_match:
+            token = GTK_NAMED_COLOR_TOKEN_MAP.get(named_match.group(2))
+            if token in colors:
+                lines.append(
+                    f"{named_match.group(1)}{named_match.group(2)}{named_match.group(3)}"
+                    f"{colors[token]}{named_match.group(5)}"
+                )
+                continue
+        lines.append(line)
     return "\n".join(lines) + "\n"
 
 
