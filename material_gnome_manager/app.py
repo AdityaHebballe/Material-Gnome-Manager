@@ -19,6 +19,15 @@ APP_ID = "io.github.materialgnome.Manager"
 PREVIEW_TOKENS = ("primary", "secondary", "tertiary", "error")
 
 
+PICKER_CSS = b"""
+.palette-card.selected {
+  border: 2px solid @accent_bg_color;
+  border-radius: 12px;
+  background-color: alpha(@accent_bg_color, 0.14);
+}
+"""
+
+
 @dataclass
 class ActionControl:
     button: Gtk.Button
@@ -60,6 +69,26 @@ def _swatch_strip(colors: dict[str, str], large: bool = False) -> Gtk.Box:
         if color:
             box.append(_swatch(color, width, height))
     return box
+
+
+def _set_card_selected(card: Gtk.Widget, selected: bool) -> None:
+    if selected:
+        card.add_css_class("selected")
+    else:
+        card.remove_css_class("selected")
+
+
+def _install_picker_css() -> None:
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_data(PICKER_CSS)
+    Gtk.StyleContext.add_provider_for_display(
+        display,
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
 
 
 def _layout_preview(layout_name: str, colors: dict[str, str]) -> Gtk.DrawingArea:
@@ -309,7 +338,7 @@ class CustomPaletteEditorWindow(Gtk.Window):
         advanced_group.add(advanced)
         search_row = Adw.ActionRow(title="Find a color role")
         self.search_entry = Gtk.SearchEntry()
-        self.search_entry.set_placeholder_text("Find a color role")
+        self.search_entry.set_placeholder_text("Role or hex value")
         self.search_entry.connect("search-changed", self._filter_advanced)
         search_row.add_suffix(self.search_entry)
         advanced.add_row(search_row)
@@ -323,12 +352,18 @@ class CustomPaletteEditorWindow(Gtk.Window):
         content.append(footer)
         cancel = Gtk.Button(label="Cancel")
         cancel.connect("clicked", lambda _button: self.close())
+        import_button = Gtk.Button(label="Import")
+        import_button.connect("clicked", self._import_palette)
+        export_button = Gtk.Button(label="Export")
+        export_button.connect("clicked", self._export_palette)
         save = Gtk.Button(label="Save")
         save.connect("clicked", self._save)
         apply = Gtk.Button(label="Apply")
         apply.add_css_class("suggested-action")
         apply.connect("clicked", self._apply)
         footer.append(cancel)
+        footer.append(import_button)
+        footer.append(export_button)
         footer.append(save)
         footer.append(apply)
 
@@ -390,7 +425,9 @@ class CustomPaletteEditorWindow(Gtk.Window):
     def _filter_advanced(self, _entry: Gtk.SearchEntry) -> None:
         query = self.search_entry.get_text().strip().lower()
         for token, row in self._advanced_rows.items():
-            row.set_visible(not query or query in token.replace("_", " "))
+            role = token.replace("_", " ")
+            value = self.colors.get(token, "").lower()
+            row.set_visible(not query or query in role or query in value)
 
     def _save(self, _button: Gtk.Button) -> None:
         try:
@@ -401,6 +438,74 @@ class CustomPaletteEditorWindow(Gtk.Window):
         self.palette = saved
         self.name_entry.set_text(saved.name)
         self.parent_window._set_log(f"Saved custom palette {saved.name}")
+
+    def _import_palette(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileChooserNative(
+            title="Import Palette",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+            accept_label="Import",
+            cancel_label="Cancel",
+        )
+        palette_filter = Gtk.FileFilter()
+        palette_filter.set_name("Palette JSON or GTK CSS")
+        palette_filter.add_pattern("*.json")
+        palette_filter.add_pattern("*.css")
+        dialog.add_filter(palette_filter)
+        dialog.connect("response", self._import_palette_response)
+        dialog.show()
+
+    def _import_palette_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
+        if response == Gtk.ResponseType.ACCEPT:
+            file = dialog.get_file()
+            path = file.get_path() if file else None
+            if path:
+                try:
+                    palette = manager.load_custom_palette_file(Path(path))
+                except manager.ManagerError as exc:
+                    self.parent_window._set_log(str(exc))
+                else:
+                    self.name_entry.set_text(palette.name)
+                    self.colors = dict(palette.colors)
+                    if palette.base_preset in self._previews_by_name:
+                        self.base_name = palette.base_preset
+                        self.base_dropdown.set_selected(
+                            [preview.name for preview in self.previews].index(self.base_name)
+                        )
+                    self._refresh_colors()
+                    self.parent_window._set_log(f"Imported palette {palette.name}")
+        dialog.destroy()
+
+    def _export_palette(self, _button: Gtk.Button) -> None:
+        dialog = Gtk.FileChooserNative(
+            title="Export Palette",
+            transient_for=self,
+            action=Gtk.FileChooserAction.SAVE,
+            accept_label="Export",
+            cancel_label="Cancel",
+        )
+        name = self.name_entry.get_text().strip() or "custom-palette"
+        dialog.set_current_name(f"{name}.json")
+        dialog.connect("response", self._export_palette_response)
+        dialog.show()
+
+    def _export_palette_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
+        if response == Gtk.ResponseType.ACCEPT:
+            file = dialog.get_file()
+            path = file.get_path() if file else None
+            if path:
+                try:
+                    manager.export_custom_palette_file(
+                        Path(path),
+                        self.name_entry.get_text(),
+                        self.base_name,
+                        self.colors,
+                    )
+                except manager.ManagerError as exc:
+                    self.parent_window._set_log(str(exc))
+                else:
+                    self.parent_window._set_log("Palette exported")
+        dialog.destroy()
 
     def _apply(self, _button: Gtk.Button) -> None:
         label = self.name_entry.get_text().strip() or "Unsaved palette"
@@ -424,6 +529,7 @@ class LayoutPickerWindow(Gtk.Window):
         self.current = current
         self.colors = colors
         self.cards: dict[str, Gtk.Image] = {}
+        self.card_widgets: dict[str, Gtk.Widget] = {}
 
         scrolled = Gtk.ScrolledWindow()
         scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -448,6 +554,8 @@ class LayoutPickerWindow(Gtk.Window):
     def _card(self, layout_name: str) -> Gtk.Widget:
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         content.add_css_class("card")
+        content.add_css_class("palette-card")
+        _set_card_selected(content, layout_name == self.current)
         content.set_size_request(210, -1)
         content.set_margin_top(6)
         content.set_margin_bottom(6)
@@ -469,6 +577,7 @@ class LayoutPickerWindow(Gtk.Window):
         title_row.append(check)
         title_row.append(title)
         self.cards[layout_name] = check
+        self.card_widgets[layout_name] = content
         content.append(title_row)
         return content
 
@@ -477,6 +586,7 @@ class LayoutPickerWindow(Gtk.Window):
             return
         for name, check in self.cards.items():
             check.set_visible(name == layout_name)
+            _set_card_selected(self.card_widgets[name], name == layout_name)
         self.parent_window.select_layout_from_picker(layout_name)
         self.close()
 
@@ -495,6 +605,7 @@ class PresetPickerWindow(Gtk.Window):
         self.previews = previews
         self.current = current
         self.cards: dict[str, Gtk.Image] = {}
+        self.card_widgets: dict[str, Gtk.Widget] = {}
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         root.set_vexpand(True)
@@ -557,6 +668,7 @@ class PresetPickerWindow(Gtk.Window):
         while child := self.flow.get_first_child():
             self.flow.remove(child)
         self.cards.clear()
+        self.card_widgets.clear()
         query = self.search_entry.get_text().strip().lower()
         custom_palettes = manager.list_custom_palettes()
         for palette in custom_palettes:
@@ -571,6 +683,8 @@ class PresetPickerWindow(Gtk.Window):
     def _card(self, preview: manager.PresetPreview) -> Gtk.Widget:
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         content.add_css_class("card")
+        content.add_css_class("palette-card")
+        _set_card_selected(content, preview.name == self.current)
         content.set_size_request(190, -1)
         content.set_margin_top(6)
         content.set_margin_bottom(6)
@@ -600,6 +714,7 @@ class PresetPickerWindow(Gtk.Window):
         check.set_visible(preview.name == self.current)
         title_row.append(check)
         self.cards[preview.name] = check
+        self.card_widgets[preview.name] = content
 
         content.append(_swatch_strip(preview.colors, large=True))
 
@@ -667,6 +782,7 @@ class PresetPickerWindow(Gtk.Window):
         self.current = preset_name
         for name, check in self.cards.items():
             check.set_visible(name == preset_name)
+            _set_card_selected(self.card_widgets[name], name == preset_name)
         self.parent_window.apply_preset_from_picker(preset_name)
 
     def _apply_custom(self, name: str) -> None:
@@ -696,6 +812,7 @@ class ManagerWindow(Adw.ApplicationWindow):
     def __init__(self, app: Adw.Application):
         super().__init__(application=app, title="Material GNOME Manager")
         self.set_default_size(1120, 860)
+        _install_picker_css()
 
         self._preset_names: list[str] = []
         self._preset_previews: list[manager.PresetPreview] = []
@@ -709,6 +826,9 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._github_busy = False
         self._busy_action: str | None = None
         self._actions: dict[str, ActionControl] = {}
+        self._update_checks_busy = False
+        self._refreshing_update_checks = False
+        self._github_source_selected = False
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -769,6 +889,30 @@ class ManagerWindow(Adw.ApplicationWindow):
         choose_button.connect("clicked", self._choose_source)
         self.source_row.add_suffix(choose_button)
         source_group.add(self.source_row)
+
+        updates_group = Adw.PreferencesGroup(
+            title="Automatic Updates",
+            description="Check the GitHub theme source in the background. No tray icon is used.",
+        )
+        content.append(updates_group)
+        self.update_checks_row = Adw.SwitchRow(
+            title="Check for theme updates",
+            subtitle="Off",
+        )
+        self.update_checks_row.connect("notify::active", self._update_checks_toggled)
+        updates_group.add(self.update_checks_row)
+        self.update_interval_row = Adw.ComboRow(
+            title="Check interval",
+            subtitle="Choose how often to look for new commits",
+        )
+        self._update_interval_keys = list(manager.UPDATE_CHECK_INTERVALS)
+        self.update_interval_row.set_model(
+            Gtk.StringList.new(
+                [manager.UPDATE_CHECK_INTERVALS[key][0] for key in self._update_interval_keys]
+            )
+        )
+        self.update_interval_row.connect("notify::selected", self._update_interval_changed)
+        updates_group.add(self.update_interval_row)
 
         self.status_group = Adw.PreferencesGroup(title="Status")
         content.append(self.status_group)
@@ -992,6 +1136,51 @@ class ManagerWindow(Adw.ApplicationWindow):
                 self.refresh(keep_log=True)
         dialog.destroy()
 
+    def _update_checks_toggled(self, _row: Adw.SwitchRow, _param) -> None:
+        if self._refreshing_update_checks:
+            return
+        interval = self._selected_update_interval() if self.update_checks_row.get_active() else None
+        self._configure_update_checks(interval)
+
+    def _update_interval_changed(self, _row: Adw.ComboRow, _param) -> None:
+        if self._refreshing_update_checks or not self.update_checks_row.get_active():
+            return
+        self._configure_update_checks(self._selected_update_interval())
+
+    def _selected_update_interval(self) -> str:
+        selected = self.update_interval_row.get_selected()
+        if selected >= len(self._update_interval_keys):
+            return self._update_interval_keys[0]
+        return self._update_interval_keys[selected]
+
+    def _configure_update_checks(self, interval: str | None) -> None:
+        if self._update_checks_busy:
+            return
+        if interval is not None and not self._github_source_selected:
+            self._set_log("Fetch and select the GitHub source before enabling update checks")
+            self.refresh(keep_log=True)
+            return
+        self._update_checks_busy = True
+        self._refresh_update_check_controls()
+
+        def worker() -> None:
+            try:
+                message = manager.configure_update_checks(interval)
+            except manager.ManagerError as exc:
+                GLib.idle_add(self._finish_update_check_configuration, str(exc))
+            except OSError as exc:
+                GLib.idle_add(self._finish_update_check_configuration, f"Filesystem error: {exc}")
+            else:
+                GLib.idle_add(self._finish_update_check_configuration, message)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_update_check_configuration(self, message: str) -> bool:
+        self._update_checks_busy = False
+        self._set_log(message)
+        self.refresh(keep_log=True)
+        return GLib.SOURCE_REMOVE
+
     def _fetch_github(self, _button: Gtk.Button | None) -> None:
         self._run_github_action(manager.fetch_or_update_github_source, "Fetching GitHub source...")
 
@@ -1003,6 +1192,11 @@ class ManagerWindow(Adw.ApplicationWindow):
             manager.update_github_source_and_installed_theme,
             "Updating source and installed theme...",
         )
+
+    def run_requested_update(self) -> bool:
+        if not self._github_busy:
+            self._update_github(None)
+        return GLib.SOURCE_REMOVE
 
     def _install_theme(self, _button: Gtk.Button) -> None:
         self._run_action("install", manager.install_theme, "Installing theme...")
@@ -1191,6 +1385,8 @@ class ManagerWindow(Adw.ApplicationWindow):
         status = manager.get_status()
         self.github_row.set_subtitle(f"{manager.GITHUB_REPO_URL}\n{status.github_source_dir}\n{status.github_state}")
         self._refresh_github_controls(status.github_state)
+        self._github_source_selected = status.source_dir == manager.GITHUB_SOURCE_DIR
+        self._refresh_update_checks(status)
         if status.source_dir:
             self.source_row.set_subtitle(f"{status.source_dir}\n{status.source_message}")
         else:
@@ -1301,6 +1497,23 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.update_button.set_visible(update_available and not self._github_busy)
         self.github_status_icon.set_visible(up_to_date and not self._github_busy)
 
+    def _refresh_update_checks(self, status: manager.ThemeStatus) -> None:
+        self._refreshing_update_checks = True
+        interval = status.update_check_interval or self._update_interval_keys[0]
+        self.update_checks_row.set_active(status.update_check_interval is not None)
+        self.update_interval_row.set_selected(self._update_interval_keys.index(interval))
+        self._refreshing_update_checks = False
+        self.update_checks_row.set_subtitle(status.update_check_state)
+        self._refresh_update_check_controls()
+
+    def _refresh_update_check_controls(self) -> None:
+        enabled = self.update_checks_row.get_active()
+        can_enable = self._github_source_selected or enabled
+        self.update_checks_row.set_sensitive(not self._update_checks_busy and can_enable)
+        self.update_interval_row.set_sensitive(
+            not self._update_checks_busy and enabled and self._github_source_selected
+        )
+
     def _refresh_status_rows(self, status: manager.ThemeStatus) -> None:
         self.install_row.set_visible(not status.installed)
         self.gtk_css_row.set_visible(status.gtk_css_state != "linked")
@@ -1382,7 +1595,11 @@ class ManagerWindow(Adw.ApplicationWindow):
 
 class ManagerApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+        super().__init__(
+            application_id=APP_ID,
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+        )
+        self._run_update_on_activate = False
 
     def do_startup(self):
         Adw.Application.do_startup(self)
@@ -1394,6 +1611,16 @@ class ManagerApp(Adw.Application):
         if window is None:
             window = ManagerWindow(self)
         window.present()
+        if self._run_update_on_activate:
+            self._run_update_on_activate = False
+            GLib.idle_add(window.run_requested_update)
+
+    def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
+        arguments = command_line.get_arguments()[1:]
+        if "--update" in arguments:
+            self._run_update_on_activate = True
+        self.activate()
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:

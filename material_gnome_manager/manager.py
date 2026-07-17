@@ -21,6 +21,17 @@ GITHUB_REPO_URL = "https://github.com/SakibShahariar/material-gnome-theme.git"
 GITHUB_SOURCE_DIR = DATA_DIR / "material-gnome-theme"
 INSTALL_DIR = Path.home() / ".themes" / THEME_NAME
 GTK4_CONFIG_DIR = Path.home() / ".config" / "gtk-4.0"
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+UPDATE_CHECK_SERVICE_NAME = "material-gnome-theme-update-check.service"
+UPDATE_CHECK_TIMER_NAME = "material-gnome-theme-update-check.timer"
+UPDATE_CHECK_SERVICE_FILE = SYSTEMD_USER_DIR / UPDATE_CHECK_SERVICE_NAME
+UPDATE_CHECK_TIMER_FILE = SYSTEMD_USER_DIR / UPDATE_CHECK_TIMER_NAME
+UPDATE_CHECK_INTERVALS = {
+    "daily": ("Daily", "1d"),
+    "weekly": ("Weekly", "7d"),
+    "fortnightly": ("Every 2 weeks", "14d"),
+    "monthly": ("Monthly", "30d"),
+}
 
 REQUIRED_SOURCE_PATHS = (
     "index.theme",
@@ -170,6 +181,8 @@ class ThemeStatus:
     current_preset: str | None
     active_layout: str | None
     reduced_animations: bool
+    update_check_interval: str | None
+    update_check_state: str
 
 
 def load_state() -> dict[str, Any]:
@@ -360,6 +373,123 @@ def apply_custom_palette(name: str) -> str:
     return apply_custom_colors(palette.colors, palette.name)
 
 
+def load_custom_palette_file(path: Path) -> CustomPalette:
+    """Load a manager palette JSON file or derive a palette from GTK color CSS."""
+    source = _require_source()
+    path = path.expanduser().resolve()
+    if not path.is_file():
+        raise ManagerError(f"Palette file does not exist: {path}")
+    if path.suffix.lower() == ".css":
+        colors = _colors_from_gtk_css(path, source)
+        return CustomPalette(name=path.stem.replace("-", " ").title(), base_preset=None, colors=colors)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManagerError("Import a valid palette JSON or GTK CSS file") from exc
+    if not isinstance(raw, dict):
+        raise ManagerError("Palette JSON must contain an object")
+    if isinstance(raw.get("palettes"), list):
+        palettes = raw["palettes"]
+        if len(palettes) != 1 or not isinstance(palettes[0], dict):
+            raise ManagerError("Palette library imports must contain exactly one palette")
+        raw = palettes[0]
+    name = raw.get("name")
+    base_preset = raw.get("base_preset")
+    colors = raw.get("colors")
+    if not isinstance(name, str) or not name.strip() or not isinstance(colors, dict):
+        raise ManagerError("Palette JSON needs a name and colors object")
+    if base_preset is not None and not isinstance(base_preset, str):
+        raise ManagerError("Palette base preset must be text")
+    normalized = {
+        token: value.upper()
+        for token, value in colors.items()
+        if isinstance(token, str) and isinstance(value, str) and HEX_RE.match(value)
+    }
+    resolved = _merge_with_source_default_colors(source, normalized)
+    _validate_required_tokens(resolved)
+    return CustomPalette(name=name.strip(), base_preset=base_preset, colors=resolved)
+
+
+def export_custom_palette_file(
+    path: Path,
+    name: str,
+    base_preset: str | None,
+    colors: dict[str, str],
+) -> None:
+    source = _require_source()
+    name = name.strip()
+    if not name:
+        raise ManagerError("Name the palette before exporting it")
+    resolved = _merge_with_source_default_colors(source, colors)
+    _validate_required_tokens(resolved)
+    path = path.expanduser()
+    if path.suffix.lower() != ".json":
+        path = path.with_suffix(".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "format": "material-gnome-manager-palette",
+                "version": 1,
+                "name": name,
+                "base_preset": base_preset,
+                "colors": resolved,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _colors_from_gtk_css(path: Path, source: Path) -> dict[str, str]:
+    named_colors: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"@define-color\s+([a-z0-9_]+)\s+(#[0-9a-fA-F]{6})\s*;", line)
+        if match:
+            named_colors[match.group(1)] = match.group(2).upper()
+    if not named_colors:
+        raise ManagerError("GTK CSS file contains no hexadecimal @define-color entries")
+    colors = _load_source_default_colors(source)
+    token_map = {
+        "primary": "accent_color",
+        "on_primary": "accent_fg_color",
+        "primary_container": "accent_bg_color",
+        "on_primary_container": "accent_fg_color",
+        "secondary": "success_color",
+        "on_secondary": "success_fg_color",
+        "secondary_container": "success_bg_color",
+        "on_secondary_container": "success_fg_color",
+        "tertiary": "warning_color",
+        "on_tertiary": "warning_fg_color",
+        "tertiary_container": "warning_bg_color",
+        "on_tertiary_container": "warning_fg_color",
+        "error": "error_color",
+        "on_error": "error_fg_color",
+        "error_container": "error_bg_color",
+        "on_error_container": "error_fg_color",
+        "surface": "window_bg_color",
+        "surface_dim": "view_bg_color",
+        "surface_container_lowest": "view_bg_color",
+        "surface_container_low": "view_bg_color",
+        "surface_container": "view_bg_color",
+        "surface_container_high": "dialog_bg_color",
+        "surface_container_highest": "dialog_bg_color",
+        "surface_variant": "headerbar_backdrop_color",
+        "on_surface": "window_fg_color",
+        "on_surface_variant": "view_fg_color",
+        "outline": "headerbar_border_color",
+        "outline_variant": "headerbar_border_color",
+        "background": "window_bg_color",
+        "on_background": "window_fg_color",
+    }
+    for token, named_color in token_map.items():
+        if named_color in named_colors:
+            colors[token] = named_colors[named_color]
+    _validate_required_tokens(colors)
+    return colors
+
+
 def get_preview_colors(source: Path | None = None) -> dict[str, str]:
     """Return the installed palette when available, otherwise the source default."""
     source = source or get_source_dir()
@@ -442,7 +572,102 @@ def get_status() -> ThemeStatus:
         current_preset=get_current_preset_name(source if valid else None),
         active_layout=state.get("active_layout"),
         reduced_animations=bool(state.get("reduced_animations")),
+        update_check_interval=get_update_check_interval(),
+        update_check_state=get_update_check_state(),
     )
+
+
+def get_update_check_interval() -> str | None:
+    interval = load_state().get("update_check_interval")
+    return interval if interval in UPDATE_CHECK_INTERVALS else None
+
+
+def get_update_check_state() -> str:
+    interval = get_update_check_interval()
+    if interval is None:
+        return "Off"
+    if not _is_github_source_selected():
+        return "Unavailable until the GitHub source is selected"
+    if not UPDATE_CHECK_TIMER_FILE.exists():
+        return "Needs to be enabled again"
+    if shutil.which("systemctl") is None:
+        return "systemd user services are unavailable"
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", UPDATE_CHECK_TIMER_NAME],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "Could not check timer status"
+    if result.stdout.strip() == "active":
+        return f"Enabled · {UPDATE_CHECK_INTERVALS[interval][0]}"
+    return "Needs to be enabled again"
+
+
+def configure_update_checks(interval: str | None) -> str:
+    if interval is not None and interval not in UPDATE_CHECK_INTERVALS:
+        raise ManagerError("Unknown update-check interval")
+    if interval is None:
+        _disable_update_check_timer()
+        state = load_state()
+        state.pop("update_check_interval", None)
+        save_state(state)
+        return "Automatic theme update checks disabled"
+    if not _is_github_source_selected():
+        raise ManagerError("Fetch and select the GitHub source before enabling update checks")
+    if shutil.which("systemctl") is None:
+        raise ManagerError("systemctl is not installed")
+
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    UPDATE_CHECK_SERVICE_FILE.write_text(
+        "[Unit]\n"
+        "Description=Check Material GNOME theme updates\n"
+        "After=graphical-session.target\n"
+        "\n[Service]\n"
+        "Type=oneshot\n"
+        "ExecStart=material-gnome-manager-update-check\n"
+        "TimeoutStartSec=10min\n",
+        encoding="utf-8",
+    )
+    _, duration = UPDATE_CHECK_INTERVALS[interval]
+    UPDATE_CHECK_TIMER_FILE.write_text(
+        "[Unit]\n"
+        "Description=Periodically check Material GNOME theme updates\n"
+        "PartOf=graphical-session.target\n"
+        "\n[Timer]\n"
+        "OnActiveSec=10min\n"
+        f"OnUnitActiveSec={duration}\n"
+        f"Unit={UPDATE_CHECK_SERVICE_NAME}\n"
+        "\n[Install]\n"
+        "WantedBy=graphical-session.target\n",
+        encoding="utf-8",
+    )
+    _run_systemctl_user(["daemon-reload"])
+    _run_systemctl_user(["enable", "--now", UPDATE_CHECK_TIMER_NAME])
+    state = load_state()
+    state["update_check_interval"] = interval
+    save_state(state)
+    return f"Automatic theme update checks enabled: {UPDATE_CHECK_INTERVALS[interval][0]}"
+
+
+def check_scheduled_theme_update() -> int:
+    """Fetch the selected GitHub clone and return the number of new upstream commits."""
+    if not _is_github_source_selected():
+        return 0
+    if shutil.which("git") is None:
+        raise ManagerError("git is not installed")
+    if not (GITHUB_SOURCE_DIR / ".git").is_dir():
+        return 0
+    _run_git(["-C", str(GITHUB_SOURCE_DIR), "fetch", "--prune", "origin"])
+    remote_ref = _remote_head_ref()
+    if remote_ref is None:
+        raise ManagerError("Could not determine origin default branch")
+    ahead, behind = _ahead_behind(remote_ref)
+    # Do not prompt for a merge that cannot be fast-forwarded. The regular
+    # source controls keep the user in charge of resolving local changes.
+    return behind if not ahead else 0
 
 
 def fetch_or_update_github_source() -> str:
@@ -1132,6 +1357,45 @@ def _run_git(args: list[str]) -> str:
             raise ManagerError(detail) from exc
         raise ManagerError("git command failed") from exc
     return result.stdout
+
+
+def _run_systemctl_user(args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise ManagerError("systemctl is not installed") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise ManagerError(detail or "systemctl user command failed") from exc
+    return result.stdout
+
+
+def _disable_update_check_timer() -> None:
+    if shutil.which("systemctl") is not None:
+        try:
+            _run_systemctl_user(["disable", "--now", UPDATE_CHECK_TIMER_NAME])
+        except ManagerError:
+            # The unit may not be installed or the user bus may be unavailable; the
+            # manager-owned files are still safe to remove below.
+            pass
+    for path in (UPDATE_CHECK_TIMER_FILE, UPDATE_CHECK_SERVICE_FILE):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+    if shutil.which("systemctl") is not None:
+        try:
+            _run_systemctl_user(["daemon-reload"])
+        except ManagerError:
+            pass
+
+
+def _is_github_source_selected() -> bool:
+    state = load_state()
+    return state.get("source_kind") == "github" and get_source_dir() == GITHUB_SOURCE_DIR
 
 
 def _remote_head_ref() -> str | None:

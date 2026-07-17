@@ -44,6 +44,7 @@ material-gnome-manager
 ## What It Does
 
 - Fetches or updates Material GNOME from GitHub.
+- Can check the GitHub source for theme updates on a daily, weekly, fortnightly, or monthly schedule, without a tray icon.
 - Installs the theme to `~/.themes/Material-Gnome`.
 - Applies bundled color presets.
 - Generates colors with Matugen from your wallpaper or a selected image.

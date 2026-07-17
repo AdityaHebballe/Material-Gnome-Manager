@@ -34,6 +34,15 @@ configure_file(
   install_mode: 'rwxr-xr-x',
 )
 
+configure_file(
+  input: 'scripts/material-gnome-manager-update-check.in',
+  output: 'material-gnome-manager-update-check',
+  configuration: launcher_conf,
+  install: true,
+  install_dir: bindir,
+  install_mode: 'rwxr-xr-x',
+)
+
 install_data(
   'data/applications/io.github.materialgnome.Manager.desktop',
   install_dir: join_paths(datadir, 'applications'),
