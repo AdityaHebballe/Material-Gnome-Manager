@@ -47,6 +47,8 @@ MANAGER_LAYOUT_START = "/* Material GNOME Manager: Top Bar Layout Start */"
 MANAGER_LAYOUT_END = "/* Material GNOME Manager: Top Bar Layout End */"
 MANAGER_ANIMATIONS_START = "/* Material GNOME Manager: Reduced Animations Start */"
 MANAGER_ANIMATIONS_END = "/* Material GNOME Manager: Reduced Animations End */"
+LIBADWAITA_COMPAT_START = "/* Material GNOME Manager: Libadwaita Compatibility Start */"
+LIBADWAITA_COMPAT_END = "/* Material GNOME Manager: Libadwaita Compatibility End */"
 ANIMATION_DECL_RE = re.compile(
     r"(?m)(^|[{\s;])([ \t]*)(animation(?:-[a-zA-Z-]+)?|transition(?:-[a-zA-Z-]+)?)\s*:[^;]*;"
 )
@@ -160,6 +162,13 @@ class CustomPalette:
     name: str
     base_preset: str | None
     colors: dict[str, str]
+
+
+@dataclass(frozen=True)
+class CompatibilityIssue:
+    severity: str
+    title: str
+    details: str
 
 
 @dataclass(frozen=True)
@@ -575,6 +584,77 @@ def get_status() -> ThemeStatus:
         update_check_interval=get_update_check_interval(),
         update_check_state=get_update_check_state(),
     )
+
+
+def get_compatibility_issues(source: Path | None = None) -> list[CompatibilityIssue]:
+    """Audit the selected upstream source against the manager's render assumptions."""
+    source = source or get_source_dir()
+    if source is None:
+        return [CompatibilityIssue("warning", "No source selected", "Choose or fetch a theme source to audit it.")]
+    valid, message = validate_source(source)
+    if not valid:
+        return [CompatibilityIssue("error", "Invalid theme source", message)]
+
+    issues: list[CompatibilityIssue] = []
+    try:
+        default_colors = _load_source_default_colors(source)
+        required = set(_tokens_from_gtk3(source / "gtk-3.0" / "colors.css"))
+        required.update(_tokens_from_gtk4(source / "gtk-4.0" / "colors.css"))
+        required.update(match.group(1) for match in SHELL_TOKEN_RE.finditer(
+            (source / "gnome-shell" / "gnome-shell-template.css").read_text(encoding="utf-8")
+        ))
+    except (OSError, ManagerError) as exc:
+        return [CompatibilityIssue("error", "Could not audit source", str(exc))]
+
+    missing_default = sorted(required.difference(default_colors))
+    if missing_default:
+        issues.append(
+            CompatibilityIssue(
+                "error",
+                "Source is missing required color tokens",
+                ", ".join(missing_default[:8]) + ("…" if len(missing_default) > 8 else ""),
+            )
+        )
+
+    unmapped = _unmapped_gtk4_named_colors(source, default_colors)
+    if unmapped:
+        issues.append(
+            CompatibilityIssue(
+                "warning",
+                "New GTK named colors are not recolored",
+                ", ".join(unmapped[:8]) + ("…" if len(unmapped) > 8 else ""),
+            )
+        )
+
+    invalid_presets = _invalid_preset_names(source, required)
+    if invalid_presets:
+        issues.append(
+            CompatibilityIssue(
+                "error",
+                "Some upstream presets cannot be applied",
+                ", ".join(invalid_presets[:5]) + ("…" if len(invalid_presets) > 5 else ""),
+            )
+        )
+
+    unknown_layout_colors = _unknown_layout_colors(source)
+    if unknown_layout_colors:
+        issues.append(
+            CompatibilityIssue(
+                "warning",
+                "New layout colors are not mapped to your palette",
+                ", ".join(unknown_layout_colors[:8]) + ("…" if len(unknown_layout_colors) > 8 else ""),
+            )
+        )
+
+    if _shell_template_diverges(source, default_colors):
+        issues.append(
+            CompatibilityIssue(
+                "error",
+                "Shell template differs from upstream generated CSS",
+                "The manager renders the template, so upstream-only generated fixes will be missed.",
+            )
+        )
+    return issues
 
 
 def get_update_check_interval() -> str | None:
@@ -1299,7 +1379,82 @@ def _render_gtk4(template: Path, colors: dict[str, str]) -> str:
                 )
                 continue
         lines.append(line)
-    return "\n".join(lines) + "\n"
+    rendered = "\n".join(lines) + "\n"
+    # Libadwaita 1.8+ uses this CSS variable for Adw.Dialog's in-window dimmer.
+    # Upstream's legacy named color is opaque, which otherwise becomes a solid
+    # black overlay when Libadwaita doubles its alpha.
+    if not re.search(r"--shade-color\s*:\s*rgb\(0 0 0 / 25%\)", rendered):
+        rendered += "\n" + _libadwaita_compatibility_block()
+    return rendered
+
+
+def _libadwaita_compatibility_block() -> str:
+    return (
+        f"{LIBADWAITA_COMPAT_START}\n"
+        ":root {\n"
+        "  --shade-color: rgb(0 0 0 / 25%);\n"
+        "}\n"
+        f"{LIBADWAITA_COMPAT_END}\n"
+    )
+
+
+def _unmapped_gtk4_named_colors(source: Path, colors: dict[str, str]) -> list[str]:
+    names: list[str] = []
+    for line in (source / "gtk-4.0" / "colors.css").read_text(encoding="utf-8").splitlines():
+        match = re.match(r"@define-color\s+([a-z0-9_-]+)\s+#[0-9a-fA-F]{6}\s*;", line)
+        if not match:
+            continue
+        name = match.group(1)
+        if name not in colors and name not in GTK_NAMED_COLOR_TOKEN_MAP:
+            names.append(name)
+    return sorted(set(names))
+
+
+def _invalid_preset_names(source: Path, required: set[str]) -> list[str]:
+    invalid: list[str] = []
+    for name in list_presets(source):
+        try:
+            colors = _load_colors(source / "themes" / f"{name}.json")
+        except ManagerError:
+            invalid.append(name)
+            continue
+        if required.difference(colors):
+            invalid.append(name)
+    return invalid
+
+
+def _unknown_layout_colors(source: Path) -> list[str]:
+    unknown: set[str] = set()
+    for path in (source / "gnome-shell" / "layouts").glob("*.css"):
+        if path.name == "active-layout.css":
+            continue
+        for value in re.findall(r"#[0-9a-fA-F]{6}", path.read_text(encoding="utf-8")):
+            if value.lower() not in LAYOUT_COLOR_MAP:
+                unknown.add(value.lower())
+    return sorted(unknown)
+
+
+def _shell_template_diverges(source: Path, colors: dict[str, str]) -> bool:
+    generated = source / "gnome-shell" / "gnome-shell.css"
+    if not generated.is_file():
+        return False
+    try:
+        rendered = _render_shell(source / "gnome-shell" / "gnome-shell-template.css", colors)
+    except ManagerError:
+        return True
+    return _normalize_shell_css(rendered) != _normalize_shell_css(
+        generated.read_text(encoding="utf-8")
+    )
+
+
+def _normalize_shell_css(text: str) -> str:
+    text = re.sub(r"#[0-9a-fA-F]{6}", "#COLOR", text)
+    text = re.sub(
+        r"rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*([0-9.]+)\s*\)",
+        r"rgba(COLOR, \1)",
+        text,
+    )
+    return text.replace("1.0)", "1)")
 
 
 def _render_shell(template: Path, colors: dict[str, str]) -> str:

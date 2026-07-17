@@ -830,6 +830,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._refreshing_update_checks = False
         self._github_source_selected = False
         self._notify_after_requested_update = False
+        self._compatibility_rows: list[Adw.ActionRow] = []
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -1032,6 +1033,12 @@ class ManagerWindow(Adw.ApplicationWindow):
             "Reset",
             self._safe_reset,
         )
+
+        self.compatibility_group = Adw.PreferencesGroup(
+            title="Compatibility Report",
+            description="Checks whether upstream changes can be rendered safely by this manager.",
+        )
+        content.append(self.compatibility_group)
         self.refresh()
         if manager.GITHUB_SOURCE_DIR.exists():
             self._check_github(None, quiet=True)
@@ -1408,6 +1415,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.gtk_dark_row.set_subtitle(status.gtk_dark_css_state)
         self.gtk_colors_row.set_subtitle(status.gtk_colors_state)
         self._refresh_status_rows(status)
+        self._refresh_compatibility_report(status.source_dir if status.source_valid else None)
         self.matugen_row.set_subtitle(status.matugen_state)
         if status.current_wallpaper:
             self.wallpaper_row.set_subtitle(str(status.current_wallpaper))
@@ -1523,6 +1531,34 @@ class ManagerWindow(Adw.ApplicationWindow):
         self.update_interval_row.set_sensitive(
             not self._update_checks_busy and enabled and self._github_source_selected
         )
+
+    def _refresh_compatibility_report(self, source: Path | None) -> None:
+        for row in self._compatibility_rows:
+            self.compatibility_group.remove(row)
+        self._compatibility_rows.clear()
+
+        def add_row(row: Adw.ActionRow) -> None:
+            self.compatibility_group.add(row)
+            self._compatibility_rows.append(row)
+
+        issues = manager.get_compatibility_issues(source)
+        if not issues:
+            row = Adw.ActionRow(
+                title="No compatibility issues detected",
+                subtitle="The source templates, palettes, layouts, and generated shell CSS agree.",
+            )
+            icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
+            icon.add_css_class("success")
+            row.add_suffix(icon)
+            add_row(row)
+            return
+        for issue in issues:
+            row = Adw.ActionRow(title=issue.title, subtitle=issue.details)
+            icon_name = (
+                "dialog-error-symbolic" if issue.severity == "error" else "dialog-warning-symbolic"
+            )
+            row.add_suffix(Gtk.Image.new_from_icon_name(icon_name))
+            add_row(row)
 
     def _refresh_status_rows(self, status: manager.ThemeStatus) -> None:
         self.install_row.set_visible(not status.installed)
