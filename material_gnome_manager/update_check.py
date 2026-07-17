@@ -30,12 +30,31 @@ def _show_notification(commits: int) -> None:
     except (OSError, subprocess.TimeoutExpired):
         return
     if result.stdout.strip() == "update" and shutil.which("material-gnome-manager"):
-        subprocess.Popen(
-            ["material-gnome-manager", "--update"],
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # The checker is a one-shot systemd service. Launch the GUI in a separate
+        # user service, otherwise systemd terminates it when this checker exits.
+        if shutil.which("systemd-run"):
+            subprocess.run(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--quiet",
+                    "--collect",
+                    "--no-block",
+                    "--unit=material-gnome-manager-notification-update",
+                    "material-gnome-manager",
+                    "--update",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                ["material-gnome-manager", "--update"],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
 
 def main() -> int:

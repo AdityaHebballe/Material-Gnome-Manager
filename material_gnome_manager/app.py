@@ -829,6 +829,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._update_checks_busy = False
         self._refreshing_update_checks = False
         self._github_source_selected = False
+        self._notify_after_requested_update = False
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -1195,6 +1196,7 @@ class ManagerWindow(Adw.ApplicationWindow):
 
     def run_requested_update(self) -> bool:
         if not self._github_busy:
+            self._notify_after_requested_update = True
             self._update_github(None)
         return GLib.SOURCE_REMOVE
 
@@ -1378,6 +1380,14 @@ class ManagerWindow(Adw.ApplicationWindow):
     def _finish_github_action(self, message: str) -> bool:
         self._github_busy = False
         self._set_log(message)
+        if self._notify_after_requested_update:
+            self._notify_after_requested_update = False
+            if message.startswith("Updated GitHub source"):
+                notification = Gio.Notification.new("Theme updated")
+                notification.set_body("Material GNOME was updated and reinstalled.")
+                app = self.get_application()
+                if isinstance(app, Gio.Application):
+                    app.send_notification("theme-update-complete", notification)
         self.refresh(keep_log=True)
         return GLib.SOURCE_REMOVE
 
