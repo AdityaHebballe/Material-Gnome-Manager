@@ -15,6 +15,7 @@ APP_NAME = "material-gnome-manager"
 THEME_NAME = "Material-Gnome"
 DATA_DIR = Path.home() / ".local" / "share" / APP_NAME
 STATE_FILE = DATA_DIR / "state.json"
+CUSTOM_PALETTES_FILE = DATA_DIR / "custom-palettes.json"
 BACKUP_DIR = DATA_DIR / "backup"
 GITHUB_REPO_URL = "https://github.com/SakibShahariar/material-gnome-theme.git"
 GITHUB_SOURCE_DIR = DATA_DIR / "material-gnome-theme"
@@ -144,6 +145,13 @@ class PresetPreview:
 
 
 @dataclass(frozen=True)
+class CustomPalette:
+    name: str
+    base_preset: str | None
+    colors: dict[str, str]
+
+
+@dataclass(frozen=True)
 class ThemeStatus:
     source_dir: Path | None
     source_valid: bool
@@ -246,6 +254,112 @@ def get_preset_previews(source: Path | None = None) -> list[PresetPreview]:
     return previews
 
 
+def list_custom_palettes() -> list[CustomPalette]:
+    """Return locally saved palettes, ignoring malformed entries safely."""
+    try:
+        raw = json.loads(CUSTOM_PALETTES_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    entries = raw.get("palettes", []) if isinstance(raw, dict) else []
+    if not isinstance(entries, list):
+        return []
+    palettes: list[CustomPalette] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        base_preset = entry.get("base_preset")
+        colors = entry.get("colors")
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or base_preset is not None and not isinstance(base_preset, str)
+            or not isinstance(colors, dict)
+        ):
+            continue
+        normalized = {
+            token: value.upper()
+            for token, value in colors.items()
+            if isinstance(token, str) and isinstance(value, str) and HEX_RE.match(value)
+        }
+        if normalized:
+            palettes.append(CustomPalette(name=name.strip(), base_preset=base_preset, colors=normalized))
+    return sorted(palettes, key=lambda palette: palette.name.casefold())
+
+
+def save_custom_palette(name: str, base_preset: str | None, colors: dict[str, str]) -> CustomPalette:
+    source = _require_source()
+    name = name.strip()
+    if not name:
+        raise ManagerError("Enter a name for the custom palette")
+    resolved = _merge_with_source_default_colors(source, colors)
+    _validate_required_tokens(resolved)
+    palette = CustomPalette(name=name, base_preset=base_preset, colors=resolved)
+    palettes = [item for item in list_custom_palettes() if item.name.casefold() != name.casefold()]
+    palettes.append(palette)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_PALETTES_FILE.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "palettes": [
+                    {
+                        "name": item.name,
+                        "base_preset": item.base_preset,
+                        "colors": item.colors,
+                    }
+                    for item in sorted(palettes, key=lambda item: item.name.casefold())
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return palette
+
+
+def delete_custom_palette(name: str) -> None:
+    remaining = [item for item in list_custom_palettes() if item.name != name]
+    if len(remaining) == len(list_custom_palettes()):
+        raise ManagerError(f"Custom palette does not exist: {name}")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CUSTOM_PALETTES_FILE.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "palettes": [
+                    {"name": item.name, "base_preset": item.base_preset, "colors": item.colors}
+                    for item in remaining
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def apply_custom_colors(colors: dict[str, str], label: str = "Custom palette") -> str:
+    source = _require_source()
+    if not INSTALL_DIR.is_dir():
+        install_theme()
+    resolved = _merge_with_source_default_colors(source, colors)
+    _validate_required_tokens(resolved)
+    _apply_colors(resolved)
+    state = load_state()
+    state["last_preset"] = f"Custom: {label}"
+    save_state(state)
+    return f"Applied custom palette {label}"
+
+
+def apply_custom_palette(name: str) -> str:
+    palette = next((item for item in list_custom_palettes() if item.name == name), None)
+    if palette is None:
+        raise ManagerError(f"Custom palette does not exist: {name}")
+    return apply_custom_colors(palette.colors, palette.name)
+
+
 def get_preview_colors(source: Path | None = None) -> dict[str, str]:
     """Return the installed palette when available, otherwise the source default."""
     source = source or get_source_dir()
@@ -266,6 +380,8 @@ def get_current_preset_name(source: Path | None = None) -> str | None:
     state = load_state()
     last_preset = state.get("last_preset")
     presets = set(list_presets(source))
+    if isinstance(last_preset, str) and last_preset.startswith("Custom: "):
+        return None
     if isinstance(last_preset, str) and last_preset in presets:
         return last_preset
     return infer_installed_preset(source)

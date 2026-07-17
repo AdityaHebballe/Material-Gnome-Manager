@@ -10,7 +10,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 from . import manager
 
@@ -173,6 +173,241 @@ def _layout_title(layout_name: str) -> str:
     return layout_name.replace("-", " ").title()
 
 
+def _palette_sample(colors: dict[str, str]) -> Gtk.DrawingArea:
+    area = Gtk.DrawingArea()
+    area.set_content_width(330)
+    area.set_content_height(118)
+    area.set_hexpand(True)
+
+    def draw(_area, ctx, width: int, height: int) -> None:
+        surface = colors.get("surface", "#111111")
+        container = colors.get("surface_container", surface)
+        primary = colors.get("primary", "#888888")
+        secondary = colors.get("secondary", primary)
+        on_surface = colors.get("on_surface", "#ffffff")
+        error = colors.get("error", "#ff0000")
+        ctx.set_source_rgb(*_hex_to_rgb(surface))
+        ctx.rectangle(0, 0, width, height)
+        ctx.fill()
+        ctx.set_source_rgb(*_hex_to_rgb(container))
+        ctx.rectangle(14, 16, width - 28, 86)
+        ctx.fill()
+        ctx.set_source_rgb(*_hex_to_rgb(on_surface))
+        ctx.rectangle(30, 32, width * 0.38, 6)
+        ctx.fill()
+        ctx.set_source_rgba(*_hex_to_rgb(on_surface), 0.55)
+        ctx.rectangle(30, 48, width * 0.54, 4)
+        ctx.fill()
+        ctx.set_source_rgb(*_hex_to_rgb(primary))
+        ctx.rectangle(30, 68, 84, 20)
+        ctx.fill()
+        ctx.set_source_rgb(*_hex_to_rgb(secondary))
+        ctx.arc(width - 58, 43, 12, 0, 6.2832)
+        ctx.fill()
+        ctx.set_source_rgb(*_hex_to_rgb(error))
+        ctx.arc(width - 28, 43, 6, 0, 6.2832)
+        ctx.fill()
+
+    area.set_draw_func(draw)
+    return area
+
+
+GUIDED_COLOR_TOKENS = (
+    ("Primary", "primary"),
+    ("Secondary", "secondary"),
+    ("Tertiary", "tertiary"),
+    ("Error", "error"),
+    ("Surface", "surface"),
+)
+
+
+def _token_title(token: str) -> str:
+    return token.replace("_", " ").title()
+
+
+class CustomPaletteEditorWindow(Gtk.Window):
+    def __init__(
+        self,
+        parent: "ManagerWindow",
+        previews: list[manager.PresetPreview],
+        *,
+        palette: manager.CustomPalette | None = None,
+        initial_name: str | None = None,
+    ):
+        super().__init__(transient_for=parent, modal=True)
+        self.set_title("Design Custom Palette")
+        self.set_default_size(680, 720)
+        self.parent_window = parent
+        self.previews = previews
+        self.palette = palette
+        self._previews_by_name = {preview.name: preview for preview in previews}
+        default_name = palette.base_preset if palette else parent._current_preset_name
+        self.base_name = default_name if default_name in self._previews_by_name else previews[0].name
+        self.colors = dict(
+            palette.colors if palette else self._previews_by_name[self.base_name].colors
+        )
+        self._color_rows: dict[str, list[tuple[Gtk.Button, Gtk.Label]]] = {}
+        self._advanced_rows: dict[str, Gtk.Widget] = {}
+
+        header = Gtk.HeaderBar()
+        header.set_title_widget(Gtk.Label(label="Design Custom Palette"))
+        self.set_titlebar(header)
+
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_hexpand(True)
+        scrolled.set_vexpand(True)
+        self.set_child(scrolled)
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(640)
+        clamp.set_tightening_threshold(480)
+        scrolled.set_child(clamp)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content.set_hexpand(True)
+        content.set_vexpand(False)
+        content.set_valign(Gtk.Align.START)
+        content.set_margin_top(18)
+        content.set_margin_bottom(18)
+        content.set_margin_start(18)
+        content.set_margin_end(18)
+        clamp.set_child(content)
+
+        name_group = Adw.PreferencesGroup(title="Palette")
+        content.append(name_group)
+        self.name_entry = Adw.EntryRow(title="Name")
+        self.name_entry.set_text(palette.name if palette else initial_name or "")
+        name_group.add(self.name_entry)
+        self.base_dropdown = Adw.ComboRow(
+            title="Start from",
+            subtitle="Changing this resets the draft to that preset",
+        )
+        self.base_dropdown.set_model(Gtk.StringList.new([preview.name for preview in previews]))
+        self.base_dropdown.set_selected([preview.name for preview in previews].index(self.base_name))
+        self.base_dropdown.connect("notify::selected", self._base_changed)
+        name_group.add(self.base_dropdown)
+
+        preview_group = Adw.PreferencesGroup(title="Live Preview")
+        content.append(preview_group)
+        self.sample_box = Gtk.Box()
+        self.sample_box.append(_palette_sample(self.colors))
+        preview_group.add(self.sample_box)
+
+        guided_group = Adw.PreferencesGroup(
+            title="Core Colors",
+            description="Adjust the main palette colors. Fine-tune all dependent roles below when needed.",
+        )
+        content.append(guided_group)
+        for title, token in GUIDED_COLOR_TOKENS:
+            guided_group.add(self._color_row(title, token))
+
+        advanced_group = Adw.PreferencesGroup(title="Fine-tuning")
+        content.append(advanced_group)
+        advanced = Adw.ExpanderRow(
+            title="Advanced colors",
+            subtitle="Edit every Material color role",
+        )
+        advanced_group.add(advanced)
+        search_row = Adw.ActionRow(title="Find a color role")
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("Find a color role")
+        self.search_entry.connect("search-changed", self._filter_advanced)
+        search_row.add_suffix(self.search_entry)
+        advanced.add_row(search_row)
+        for token in sorted(self.colors):
+            row = self._color_row(_token_title(token), token)
+            advanced.add_row(row)
+            self._advanced_rows[token] = row
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        footer.set_halign(Gtk.Align.END)
+        content.append(footer)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda _button: self.close())
+        save = Gtk.Button(label="Save")
+        save.connect("clicked", self._save)
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        apply.connect("clicked", self._apply)
+        footer.append(cancel)
+        footer.append(save)
+        footer.append(apply)
+
+    def _color_row(self, title: str, token: str) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=title)
+        button = Gtk.Button()
+        button.set_valign(Gtk.Align.CENTER)
+        button.connect("clicked", lambda _button: self._choose_color(token))
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        swatch = _swatch(self.colors.get(token, "#000000"), 28, 20)
+        label = Gtk.Label(label=self.colors.get(token, "#000000"))
+        label.add_css_class("monospace")
+        content.append(swatch)
+        content.append(label)
+        button.set_child(content)
+        row.add_suffix(button)
+        self._color_rows.setdefault(token, []).append((button, label))
+        return row
+
+    def _base_changed(self, _dropdown: Gtk.DropDown, _param) -> None:
+        selected = self.base_dropdown.get_selected()
+        if selected < 0 or selected >= len(self.previews):
+            return
+        self.base_name = self.previews[selected].name
+        self.colors = dict(self._previews_by_name[self.base_name].colors)
+        self._refresh_colors()
+
+    def _choose_color(self, token: str) -> None:
+        initial = Gdk.RGBA()
+        initial.parse(self.colors[token])
+        dialog = Gtk.ColorDialog()
+        dialog.set_title(f"Choose {_token_title(token)}")
+        dialog.choose_rgba(self, initial, None, lambda dialog, result: self._color_chosen(dialog, result, token))
+
+    def _color_chosen(self, dialog: Gtk.ColorDialog, result, token: str) -> None:
+        try:
+            color = dialog.choose_rgba_finish(result)
+        except GLib.Error:
+            return
+        self.colors[token] = "#{:02X}{:02X}{:02X}".format(
+            round(color.red * 255), round(color.green * 255), round(color.blue * 255)
+        )
+        self._refresh_colors()
+
+    def _refresh_colors(self) -> None:
+        for token, rows in self._color_rows.items():
+            for button, label in rows:
+                label.set_text(self.colors.get(token, "#000000"))
+                child = button.get_child()
+                if isinstance(child, Gtk.Box):
+                    old_swatch = child.get_first_child()
+                    if old_swatch:
+                        child.remove(old_swatch)
+                    child.prepend(_swatch(self.colors.get(token, "#000000"), 28, 20))
+        while child := self.sample_box.get_first_child():
+            self.sample_box.remove(child)
+        self.sample_box.append(_palette_sample(self.colors))
+
+    def _filter_advanced(self, _entry: Gtk.SearchEntry) -> None:
+        query = self.search_entry.get_text().strip().lower()
+        for token, row in self._advanced_rows.items():
+            row.set_visible(not query or query in token.replace("_", " "))
+
+    def _save(self, _button: Gtk.Button) -> None:
+        try:
+            saved = manager.save_custom_palette(self.name_entry.get_text(), self.base_name, self.colors)
+        except manager.ManagerError as exc:
+            self.parent_window._set_log(str(exc))
+            return
+        self.palette = saved
+        self.name_entry.set_text(saved.name)
+        self.parent_window._set_log(f"Saved custom palette {saved.name}")
+
+    def _apply(self, _button: Gtk.Button) -> None:
+        label = self.name_entry.get_text().strip() or "Unsaved palette"
+        self.parent_window.apply_custom_colors_from_editor(self.colors, label)
+        self.close()
+
+
 class LayoutPickerWindow(Gtk.Window):
     def __init__(
         self,
@@ -228,11 +463,11 @@ class LayoutPickerWindow(Gtk.Window):
         title.set_xalign(0)
         title.set_hexpand(True)
         title.set_ellipsize(Pango.EllipsizeMode.END)
-        title_row.append(title)
         check = Gtk.Image.new_from_icon_name("object-select-symbolic")
         check.add_css_class("success")
         check.set_visible(layout_name == self.current)
         title_row.append(check)
+        title_row.append(title)
         self.cards[layout_name] = check
         content.append(title_row)
         return content
@@ -268,6 +503,22 @@ class PresetPickerWindow(Gtk.Window):
         header = Gtk.HeaderBar()
         header.set_title_widget(Gtk.Label(label="Choose Color Preset"))
         self.set_titlebar(header)
+
+        create_group = Adw.PreferencesGroup()
+        create_group.set_margin_top(12)
+        create_group.set_margin_start(12)
+        create_group.set_margin_end(12)
+        create_row = Adw.ActionRow(
+            title="Create custom palette",
+            subtitle="Start from a preset, tune the colors, and save it for later",
+        )
+        create_button = Gtk.Button(label="Design")
+        create_button.add_css_class("suggested-action")
+        create_button.set_valign(Gtk.Align.CENTER)
+        create_button.connect("clicked", self._create_custom)
+        create_row.add_suffix(create_button)
+        create_group.add(create_row)
+        root.append(create_group)
 
         search_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         search_box.set_margin_top(12)
@@ -307,6 +558,11 @@ class PresetPickerWindow(Gtk.Window):
             self.flow.remove(child)
         self.cards.clear()
         query = self.search_entry.get_text().strip().lower()
+        custom_palettes = manager.list_custom_palettes()
+        for palette in custom_palettes:
+            if query and query not in palette.name.lower():
+                continue
+            self.flow.append(self._custom_card(palette))
         for preview in self.previews:
             if query and query not in preview.name.lower():
                 continue
@@ -365,6 +621,46 @@ class PresetPickerWindow(Gtk.Window):
 
         return content
 
+    def _custom_card(self, palette: manager.CustomPalette) -> Gtk.Widget:
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        content.add_css_class("card")
+        content.set_size_request(190, -1)
+        content.set_margin_top(6)
+        content.set_margin_bottom(6)
+        content.set_margin_start(6)
+        content.set_margin_end(6)
+        surface = palette.colors.get("surface", "#000000")
+        area = _swatch(surface, 160, 64)
+        area.set_hexpand(True)
+        content.append(area)
+        title = Gtk.Label(label=palette.name)
+        title.set_xalign(0)
+        title.set_ellipsize(Pango.EllipsizeMode.END)
+        content.append(title)
+        caption = Gtk.Label(label=f"Custom · {palette.base_preset or 'Source default'}")
+        caption.set_xalign(0)
+        caption.add_css_class("caption")
+        content.append(caption)
+        content.append(_swatch_strip(palette.colors, large=True))
+        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        apply.connect("clicked", lambda _button: self._apply_custom(palette.name))
+        edit = Gtk.Button(label="Edit")
+        edit.connect("clicked", lambda _button: self._edit_custom(palette))
+        duplicate = Gtk.Button(icon_name="edit-copy-symbolic")
+        duplicate.set_tooltip_text("Duplicate palette")
+        duplicate.connect("clicked", lambda _button: self._edit_custom(palette, duplicate=True))
+        delete = Gtk.Button(icon_name="user-trash-symbolic")
+        delete.set_tooltip_text("Delete palette")
+        delete.connect("clicked", lambda _button: self._delete_custom(palette.name))
+        actions.append(apply)
+        actions.append(edit)
+        actions.append(duplicate)
+        actions.append(delete)
+        content.append(actions)
+        return content
+
     def _apply(self, preset_name: str) -> None:
         if self.parent_window.is_busy():
             return
@@ -372,6 +668,28 @@ class PresetPickerWindow(Gtk.Window):
         for name, check in self.cards.items():
             check.set_visible(name == preset_name)
         self.parent_window.apply_preset_from_picker(preset_name)
+
+    def _apply_custom(self, name: str) -> None:
+        if self.parent_window.is_busy():
+            return
+        self.parent_window.apply_saved_custom_palette(name)
+
+    def _create_custom(self, _button: Gtk.Button) -> None:
+        self.close()
+        self.parent_window.open_custom_palette_editor()
+
+    def _edit_custom(self, palette: manager.CustomPalette, duplicate: bool = False) -> None:
+        self.close()
+        self.parent_window.open_custom_palette_editor(palette, duplicate=duplicate)
+
+    def _delete_custom(self, name: str) -> None:
+        try:
+            manager.delete_custom_palette(name)
+        except manager.ManagerError as exc:
+            self.parent_window._set_log(str(exc))
+            return
+        self.parent_window._set_log(f"Deleted custom palette {name}")
+        self._populate()
 
 
 class ManagerWindow(Adw.ApplicationWindow):
@@ -383,6 +701,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._preset_previews: list[manager.PresetPreview] = []
         self._preset_preview_by_name: dict[str, manager.PresetPreview] = {}
         self._current_preset_name: str | None = None
+        self._last_preset_label: str | None = None
         self._theme_installed = False
         self._layout_names: list[str] = []
         self._selected_layout_name: str | None = None
@@ -695,6 +1014,23 @@ class ManagerWindow(Adw.ApplicationWindow):
         picker = PresetPickerWindow(self, self._preset_previews, self._current_preset_name)
         picker.present()
 
+    def open_custom_palette_editor(
+        self,
+        palette: manager.CustomPalette | None = None,
+        duplicate: bool = False,
+    ) -> None:
+        if not self._preset_previews:
+            self._set_log("Fetch or choose a theme source before creating a palette")
+            return
+        if duplicate and palette:
+            palette = manager.CustomPalette(
+                name=f"{palette.name} copy",
+                base_preset=palette.base_preset,
+                colors=dict(palette.colors),
+            )
+        editor = CustomPaletteEditorWindow(self, self._preset_previews, palette=palette)
+        editor.present()
+
     def _open_layout_picker(self, _button: Gtk.Button) -> None:
         if not self._layout_names:
             self._set_log("No top bar layouts available")
@@ -716,6 +1052,22 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._current_preset_name = preset_name
         self._refresh_preset_row()
         self._run_action("preset", lambda: manager.apply_preset(preset_name), "Applying color preset...")
+
+    def apply_saved_custom_palette(self, name: str) -> None:
+        self._current_preset_name = None
+        self._last_preset_label = f"Custom: {name}"
+        self._refresh_preset_row()
+        self._run_action("preset", lambda: manager.apply_custom_palette(name), "Applying custom palette...")
+
+    def apply_custom_colors_from_editor(self, colors: dict[str, str], label: str) -> None:
+        self._current_preset_name = None
+        self._last_preset_label = f"Custom: {label}"
+        self._refresh_preset_row()
+        self._run_action(
+            "preset",
+            lambda: manager.apply_custom_colors(colors, label),
+            "Applying custom palette...",
+        )
 
     def _apply_matugen_wallpaper(self, _button: Gtk.Button) -> None:
         self._run_action(
@@ -861,6 +1213,7 @@ class ManagerWindow(Adw.ApplicationWindow):
         self._preset_previews = manager.get_preset_previews(status.source_dir if status.source_valid else None)
         self._preset_preview_by_name = {preview.name: preview for preview in self._preset_previews}
         self._current_preset_name = status.current_preset
+        self._last_preset_label = status.last_preset
         self._refresh_preset_row()
         self._layout_names = status.layouts
         if self._selected_layout_name not in self._layout_names:
@@ -888,7 +1241,10 @@ class ManagerWindow(Adw.ApplicationWindow):
             self.preset_preview_box.append(_swatch_strip(preview.colors))
             self.preset_check_icon.set_visible(self._busy_action != "preset")
         elif self._preset_previews:
-            label = "Custom / Matugen" if self._theme_installed else "No preset applied"
+            if self._last_preset_label and self._last_preset_label.startswith("Custom: "):
+                label = self._last_preset_label
+            else:
+                label = "Custom / Matugen" if self._theme_installed else "No preset applied"
             self.preset_row.set_subtitle(f"{label}. {len(self._preset_previews)} presets available.")
             self.preset_check_icon.set_visible(False)
         else:
@@ -1008,7 +1364,9 @@ class ManagerWindow(Adw.ApplicationWindow):
                 control.spinner.start()
             else:
                 control.spinner.stop()
-            control.check_icon.set_visible(done[action_id] and not busy)
+            control.check_icon.set_visible(
+                action_id != "shell_layout" and done[action_id] and not busy
+            )
             control.button.set_visible(
                 runnable[action_id] and (repeatable or not done[action_id]) and not busy
             )
