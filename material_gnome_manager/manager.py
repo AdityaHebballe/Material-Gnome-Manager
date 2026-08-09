@@ -59,7 +59,13 @@ GTK_ANIMATION_FILES = (
     "gtk-4.0/gtk-dark.css",
 )
 LAYOUT_COLOR_MAP = {
-    # Current upstream layouts use this palette (as of July 2026).
+    # Current upstream layouts use this palette (as of August 2026).
+    "#f8bb71": "primary",
+    "#472a00": "on_primary",
+    "#18120c": "surface",
+    "#251e17": "surface_container",
+    "#eee0d4": "on_surface",
+    # Previous upstream layouts (July 2026).
     "#dfc2a3": "primary",
     "#3f2d17": "on_primary",
     "#151311": "surface",
@@ -1383,7 +1389,10 @@ def _render_gtk4(template: Path, colors: dict[str, str]) -> str:
     # Libadwaita 1.8+ uses this CSS variable for Adw.Dialog's in-window dimmer.
     # Upstream's legacy named color is opaque, which otherwise becomes a solid
     # black overlay when Libadwaita doubles its alpha.
-    if not re.search(r"--shade-color\s*:\s*rgb\(0 0 0 / 25%\)", rendered):
+    if not re.search(
+        r"--shade-color\s*:\s*rgb\([^;)]*/\s*(?:25%|0?\.25)\s*\)",
+        rendered,
+    ):
         rendered += "\n" + _libadwaita_compatibility_block()
     return rendered
 
