@@ -17,6 +17,8 @@ DATA_DIR = Path.home() / ".local" / "share" / APP_NAME
 STATE_FILE = DATA_DIR / "state.json"
 CUSTOM_PALETTES_FILE = DATA_DIR / "custom-palettes.json"
 BACKUP_DIR = DATA_DIR / "backup"
+# GTK4 link backups must outlive normal install/preset/layout backups.
+GTK4_LINK_BACKUP_DIR = DATA_DIR / "gtk4-links-backup"
 GITHUB_REPO_URL = "https://github.com/SakibShahariar/material-gnome-theme.git"
 GITHUB_SOURCE_DIR = DATA_DIR / "material-gnome-theme"
 INSTALL_DIR = Path.home() / ".themes" / THEME_NAME
@@ -58,6 +60,7 @@ GTK_ANIMATION_FILES = (
     "gtk-4.0/gtk.css",
     "gtk-4.0/gtk-dark.css",
 )
+GTK4_LINK_FILES = ("gtk.css", "gtk-dark.css", "colors.css")
 LAYOUT_COLOR_MAP = {
     # Current upstream layouts use this palette (as of August 2026).
     "#f8bb71": "primary",
@@ -1013,13 +1016,17 @@ def enable_gtk4_links() -> str:
     if not (INSTALL_DIR / "gtk-4.0" / "gtk.css").exists():
         raise ManagerError("Install the theme before enabling GTK4 links")
 
-    _reset_backup("gtk4-links")
     GTK4_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    targets = tuple(GTK4_CONFIG_DIR / name for name in GTK4_LINK_FILES)
+    sources = tuple(INSTALL_DIR / "gtk-4.0" / name for name in GTK4_LINK_FILES)
+    # Keep the first pre-manager version until the links are reset.  This makes
+    # Enable idempotent and prevents unrelated manager actions from losing it.
+    if not any(_is_manager_symlink(target, source) for target, source in zip(targets, sources)):
+        _reset_backup("gtk4-links", GTK4_LINK_BACKUP_DIR)
+
     created: list[str] = []
-    for name in ("gtk.css", "gtk-dark.css", "colors.css"):
-        target = GTK4_CONFIG_DIR / name
-        source = INSTALL_DIR / "gtk-4.0" / name
-        _replace_with_symlink(target, source)
+    for target, source in zip(targets, sources):
+        _replace_with_symlink(target, source, GTK4_LINK_BACKUP_DIR)
         created.append(str(target))
 
     state = load_state()
@@ -1032,17 +1039,23 @@ def enable_gtk4_links() -> str:
 
 def reset_gtk4_links() -> str:
     state = load_state()
-    created = {Path(value) for value in state.get("created_files", [])}
-    for target in (
-        GTK4_CONFIG_DIR / "gtk.css",
-        GTK4_CONFIG_DIR / "gtk-dark.css",
-        GTK4_CONFIG_DIR / "colors.css",
-    ):
-        if target in created and target.is_symlink():
+    for name in GTK4_LINK_FILES:
+        target = GTK4_CONFIG_DIR / name
+        source = INSTALL_DIR / "gtk-4.0" / name
+        # Never remove a link changed by the user after enabling the feature.
+        if _is_manager_symlink(target, source):
             target.unlink()
-    _restore_backup("gtk4-links")
+    if _read_backup_manifest(GTK4_LINK_BACKUP_DIR).get("scope") == "gtk4-links":
+        _restore_backup("gtk4-links", GTK4_LINK_BACKUP_DIR, only_missing=True)
+    else:
+        # Migrate backups made by releases before GTK4 links had their own
+        # persistent backup location.
+        _restore_backup("gtk4-links", only_missing=True)
     state["created_files"] = [
-        value for value in state.get("created_files", []) if Path(value).exists()
+        value
+        for value in state.get("created_files", [])
+        if Path(value) not in {GTK4_CONFIG_DIR / name for name in GTK4_LINK_FILES}
+        and (Path(value).exists() or Path(value).is_symlink())
     ]
     save_state(state)
     return "GTK4 links reset"
@@ -1600,31 +1613,40 @@ def _ahead_behind(remote_ref: str) -> tuple[int, int]:
         raise ManagerError(f"Could not parse git status: {output}") from exc
 
 
-def _replace_with_symlink(target: Path, source: Path) -> None:
+def _is_manager_symlink(target: Path, source: Path) -> bool:
+    if not target.is_symlink():
+        return False
+    try:
+        return target.resolve(strict=False) == source
+    except OSError:
+        return False
+
+
+def _replace_with_symlink(target: Path, source: Path, backup_dir: Path = BACKUP_DIR) -> None:
     if not source.exists():
         raise ManagerError(f"Missing installed GTK4 file: {source.name}")
     if target.exists() or target.is_symlink():
-        if target.is_symlink() and target.resolve(strict=False) == source:
+        if _is_manager_symlink(target, source):
             return
-        _backup_path(target)
+        _backup_path(target, backup_dir)
         if target.is_dir() and not target.is_symlink():
             raise ManagerError(f"Refusing to replace directory: {target}")
         target.unlink()
     os.symlink(source, target)
 
 
-def _reset_backup(scope: str) -> None:
-    if BACKUP_DIR.exists():
-        shutil.rmtree(BACKUP_DIR)
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    (BACKUP_DIR / "manifest.json").write_text(
+def _reset_backup(scope: str, backup_dir: Path = BACKUP_DIR) -> None:
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "manifest.json").write_text(
         json.dumps({"scope": scope, "paths": []}, indent=2),
         encoding="utf-8",
     )
 
 
-def _read_backup_manifest() -> dict[str, Any]:
-    manifest_path = BACKUP_DIR / "manifest.json"
+def _read_backup_manifest(backup_dir: Path = BACKUP_DIR) -> dict[str, Any]:
+    manifest_path = backup_dir / "manifest.json"
     if not manifest_path.exists():
         return {"scope": None, "paths": []}
     try:
@@ -1635,18 +1657,18 @@ def _read_backup_manifest() -> dict[str, Any]:
     return data
 
 
-def _write_backup_manifest(data: dict[str, Any]) -> None:
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    (BACKUP_DIR / "manifest.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _write_backup_manifest(data: dict[str, Any], backup_dir: Path = BACKUP_DIR) -> None:
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "manifest.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _backup_path(path: Path) -> None:
+def _backup_path(path: Path, backup_dir: Path = BACKUP_DIR) -> None:
     if not path.exists() and not path.is_symlink():
         return
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    manifest = _read_backup_manifest()
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    manifest = _read_backup_manifest(backup_dir)
     backup_name = f"item-{len(manifest['paths'])}"
-    backup_path = BACKUP_DIR / backup_name
+    backup_path = backup_dir / backup_name
     if path.is_symlink():
         manifest["paths"].append(
             {"path": str(path), "type": "symlink", "target": os.readlink(path)}
@@ -1658,15 +1680,22 @@ def _backup_path(path: Path) -> None:
         backup_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, backup_path)
         manifest["paths"].append({"path": str(path), "type": "file", "backup": backup_name})
-    _write_backup_manifest(manifest)
+    _write_backup_manifest(manifest, backup_dir)
 
 
-def _restore_backup(scope: str) -> None:
-    manifest = _read_backup_manifest()
+def _restore_backup(
+    scope: str,
+    backup_dir: Path = BACKUP_DIR,
+    *,
+    only_missing: bool = False,
+) -> None:
+    manifest = _read_backup_manifest(backup_dir)
     if manifest.get("scope") != scope:
         return
     for entry in reversed(manifest.get("paths", [])):
         path = Path(entry["path"])
+        if only_missing and (path.exists() or path.is_symlink()):
+            continue
         if path.exists() or path.is_symlink():
             if path.is_dir() and not path.is_symlink():
                 shutil.rmtree(path)
@@ -1676,6 +1705,6 @@ def _restore_backup(scope: str) -> None:
         if entry["type"] == "symlink":
             os.symlink(entry["target"], path)
         elif entry["type"] == "dir":
-            shutil.copytree(BACKUP_DIR / entry["backup"], path)
+            shutil.copytree(backup_dir / entry["backup"], path)
         elif entry["type"] == "file":
-            shutil.copy2(BACKUP_DIR / entry["backup"], path)
+            shutil.copy2(backup_dir / entry["backup"], path)
